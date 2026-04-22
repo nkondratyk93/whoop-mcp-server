@@ -85,6 +85,7 @@ export interface WhoopSleep {
 
 export interface WhoopWorkout {
 	id: string;
+	v1_id?: number;
 	user_id: number;
 	created_at: string;
 	updated_at: string;
@@ -100,7 +101,10 @@ export interface WhoopWorkout {
 		max_heart_rate: number;
 		kilojoule: number;
 		percent_recorded: number;
-		zone_duration?: {
+		distance_meter?: number;
+		altitude_gain_meter?: number;
+		altitude_change_meter?: number;
+		zone_durations?: {
 			zone_zero_milli: number;
 			zone_one_milli: number;
 			zone_two_milli: number;
@@ -168,6 +172,7 @@ export interface DbSleep {
 
 export interface DbWorkout {
 	id: string;
+	v1_id: number | null;
 	user_id: number;
 	sport_id: number;
 	sport_name: string | null;
@@ -180,6 +185,9 @@ export interface DbWorkout {
 	max_hr: number | null;
 	kilojoule: number | null;
 	percent_recorded: number | null;
+	distance_meter: number | null;
+	altitude_gain_meter: number | null;
+	altitude_change_meter: number | null;
 	zone_zero_milli: number | null;
 	zone_one_milli: number | null;
 	zone_two_milli: number | null;

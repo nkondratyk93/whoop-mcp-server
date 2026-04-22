@@ -125,6 +125,7 @@ export class WhoopDatabase {
 
 			CREATE TABLE IF NOT EXISTS workouts (
 				id TEXT PRIMARY KEY,
+				v1_id INTEGER,
 				user_id INTEGER NOT NULL,
 				sport_id INTEGER NOT NULL,
 				sport_name TEXT,
@@ -137,6 +138,9 @@ export class WhoopDatabase {
 				max_hr INTEGER,
 				kilojoule REAL,
 				percent_recorded REAL,
+				distance_meter REAL,
+				altitude_gain_meter REAL,
+				altitude_change_meter REAL,
 				zone_zero_milli INTEGER,
 				zone_one_milli INTEGER,
 				zone_two_milli INTEGER,
@@ -166,6 +170,10 @@ export class WhoopDatabase {
 		addCol('percent_recorded', 'REAL');
 		addCol('created_at', 'TEXT');
 		addCol('updated_at', 'TEXT');
+		addCol('v1_id', 'INTEGER');
+		addCol('distance_meter', 'REAL');
+		addCol('altitude_gain_meter', 'REAL');
+		addCol('altitude_change_meter', 'REAL');
 	}
 
 	saveTokens(tokens: WhoopTokens): void {
@@ -314,17 +322,19 @@ export class WhoopDatabase {
 	upsertWorkouts(workouts: WhoopWorkout[]): void {
 		const stmt = this.db.prepare(`
 			INSERT OR REPLACE INTO workouts (
-				id, user_id, sport_id, sport_name, start_time, end_time, timezone_offset, score_state,
+				id, v1_id, user_id, sport_id, sport_name, start_time, end_time, timezone_offset, score_state,
 				strain, avg_hr, max_hr, kilojoule, percent_recorded,
+				distance_meter, altitude_gain_meter, altitude_change_meter,
 				zone_zero_milli, zone_one_milli, zone_two_milli, zone_three_milli, zone_four_milli, zone_five_milli,
 				created_at, updated_at, synced_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		`);
 
 		const insertMany = this.db.transaction((items: WhoopWorkout[]) => {
 			for (const w of items) {
 				stmt.run(
 					w.id,
+					w.v1_id ?? null,
 					w.user_id,
 					w.sport_id,
 					w.sport_name ?? null,
@@ -337,12 +347,15 @@ export class WhoopDatabase {
 					w.score?.max_heart_rate ?? null,
 					w.score?.kilojoule ?? null,
 					w.score?.percent_recorded ?? null,
-					w.score?.zone_duration?.zone_zero_milli ?? null,
-					w.score?.zone_duration?.zone_one_milli ?? null,
-					w.score?.zone_duration?.zone_two_milli ?? null,
-					w.score?.zone_duration?.zone_three_milli ?? null,
-					w.score?.zone_duration?.zone_four_milli ?? null,
-					w.score?.zone_duration?.zone_five_milli ?? null,
+					w.score?.distance_meter ?? null,
+					w.score?.altitude_gain_meter ?? null,
+					w.score?.altitude_change_meter ?? null,
+					w.score?.zone_durations?.zone_zero_milli ?? null,
+					w.score?.zone_durations?.zone_one_milli ?? null,
+					w.score?.zone_durations?.zone_two_milli ?? null,
+					w.score?.zone_durations?.zone_three_milli ?? null,
+					w.score?.zone_durations?.zone_four_milli ?? null,
+					w.score?.zone_durations?.zone_five_milli ?? null,
 					w.created_at ?? null,
 					w.updated_at ?? null
 				);

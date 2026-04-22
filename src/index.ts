@@ -334,7 +334,9 @@ function createMcpServer(): Server {
 						const durationMs = new Date(w.end_time).getTime() - new Date(w.start_time).getTime();
 
 						response += `## ${sport.charAt(0).toUpperCase() + sport.slice(1)} — ${fmtIso(w.start_time)}\n`;
-						response += `- **ID**: \`${w.id}\` (sport_id ${w.sport_id})\n`;
+						response += `- **ID**: \`${w.id}\` (sport_id ${w.sport_id}`;
+						if (w.v1_id !== null) response += `, v1_id ${w.v1_id}`;
+						response += `)\n`;
 						response += `- **Start → End**: ${fmtIso(w.start_time)} → ${fmtIso(w.end_time)}`;
 						if (w.timezone_offset) response += ` (${w.timezone_offset})`;
 						response += `\n`;
@@ -351,6 +353,18 @@ function createMcpServer(): Server {
 						}
 						if (w.avg_hr !== null || w.max_hr !== null) {
 							response += `- **HR**: avg ${w.avg_hr ?? 'N/A'} · max ${w.max_hr ?? 'N/A'} bpm\n`;
+						}
+						if (w.distance_meter !== null) {
+							const d = w.distance_meter >= 1000
+								? `${(w.distance_meter / 1000).toFixed(2)} km`
+								: `${w.distance_meter.toFixed(0)} m`;
+							response += `- **Distance**: ${d}\n`;
+						}
+						if (w.altitude_gain_meter !== null || w.altitude_change_meter !== null) {
+							const parts: string[] = [];
+							if (w.altitude_gain_meter !== null) parts.push(`gain ${w.altitude_gain_meter.toFixed(1)} m`);
+							if (w.altitude_change_meter !== null) parts.push(`net ${w.altitude_change_meter >= 0 ? '+' : ''}${w.altitude_change_meter.toFixed(1)} m`);
+							response += `- **Elevation**: ${parts.join(' · ')}\n`;
 						}
 
 						const zones: Array<[string, number | null]> = [
