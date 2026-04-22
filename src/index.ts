@@ -159,6 +159,34 @@ function createMcpServer(): Server {
 				description: 'Get the Whoop authorization URL to connect your account.',
 				inputSchema: { type: 'object', properties: {}, required: [] },
 			},
+			{
+				name: 'get_readiness_brief',
+				description: 'Training-readiness verdict for today. Combines current recovery, 3-day HRV vs 30-day baseline, RHR drift, last night sleep debt, and yesterday strain into a green/yellow/red recommendation.',
+				inputSchema: { type: 'object', properties: {}, required: [] },
+			},
+			{
+				name: 'get_training_load',
+				description: 'Day-by-day training load joined with next-day recovery and HRV. Shows daily strain, workout count, sports, and how each day affected recovery.',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
+					required: [],
+				},
+			},
+			{
+				name: 'get_sleep_debt',
+				description: 'Sleep debt analysis: per-night actual vs needed sleep (baseline + carried debt + strain-driven), shortfall, and summary of nights short of need.',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
+					required: [],
+				},
+			},
+			{
+				name: 'get_profile',
+				description: 'Get the authenticated user profile and body measurements (height, weight, max heart rate) from Whoop.',
+				inputSchema: { type: 'object', properties: {}, required: [] },
+			},
 		],
 	}));
 
@@ -167,7 +195,10 @@ function createMcpServer(): Server {
 		const typedArgs = (args ?? {}) as ToolArguments;
 
 		try {
-			const dataTools = ['get_today', 'get_recovery_trends', 'get_sleep_analysis', 'get_strain_history', 'get_workouts'];
+			const dataTools = [
+				'get_today', 'get_recovery_trends', 'get_sleep_analysis', 'get_strain_history',
+				'get_workouts', 'get_readiness_brief', 'get_training_load', 'get_sleep_debt',
+			];
 			if (dataTools.includes(name)) {
 				const tokens = db.getTokens();
 				if (!tokens) {
@@ -433,6 +464,224 @@ function createMcpServer(): Server {
 							text: `To authorize with Whoop:\n\n1. Visit: ${url}\n2. Log in and authorize\n3. You'll be redirected back automatically\n\nRedirect URI: ${config.redirectUri}`,
 						}],
 					};
+				}
+
+				case 'get_readiness_brief': {
+					const recovery = db.getLatestRecovery();
+					const sleep = db.getLatestSleep();
+					const cycle = db.getLatestCycle();
+					const avgHrv3 = db.getAvgHrv(3);
+					const avgHrv30 = db.getAvgHrv(30);
+					const avgRhr30 = db.getAvgRhr(30);
+
+					if (!recovery) {
+						return { content: [{ type: 'text', text: 'No recovery data available yet. Run sync_data first.' }] };
+					}
+
+					const hrvDeviation = avgHrv3 !== null && avgHrv30 !== null && avgHrv30 > 0
+						? ((avgHrv3 - avgHrv30) / avgHrv30) * 100
+						: null;
+					const rhrDeviation = recovery.resting_hr !== null && avgRhr30 !== null
+						? recovery.resting_hr - avgRhr30
+						: null;
+
+					const totalNeed = (sleep?.sleep_needed_baseline_milli ?? 0)
+						+ (sleep?.sleep_needed_debt_milli ?? 0)
+						+ (sleep?.sleep_needed_strain_milli ?? 0);
+					const actualSleep = (sleep?.total_in_bed_milli ?? 0) - (sleep?.total_awake_milli ?? 0);
+					const sleepShortfall = totalNeed - actualSleep;
+
+					let verdict = 'GREEN — push hard';
+					const reasons: string[] = [];
+
+					const rec = recovery.recovery_score;
+					if (rec !== null && rec < 34) {
+						verdict = 'RED — deload / rest';
+						reasons.push(`recovery ${rec}% in red zone`);
+					} else if (rec !== null && rec < 67) {
+						verdict = 'YELLOW — moderate intensity';
+						reasons.push(`recovery ${rec}% in yellow zone`);
+					}
+
+					if (hrvDeviation !== null) {
+						if (hrvDeviation < -15) {
+							verdict = 'RED — HRV significantly below baseline';
+							reasons.push(`3-day HRV ${hrvDeviation.toFixed(1)}% below 30-day baseline`);
+						} else if (hrvDeviation < -8) {
+							if (verdict.startsWith('GREEN')) verdict = 'YELLOW — HRV trending down';
+							reasons.push(`3-day HRV ${hrvDeviation.toFixed(1)}% below 30-day baseline`);
+						}
+					}
+
+					if (rhrDeviation !== null && rhrDeviation > 5) {
+						if (verdict.startsWith('GREEN')) verdict = 'YELLOW — elevated RHR';
+						reasons.push(`RHR ${rhrDeviation > 0 ? '+' : ''}${rhrDeviation.toFixed(0)} bpm vs 30-day avg`);
+					}
+
+					if (sleepShortfall > 7_200_000) {
+						if (verdict.startsWith('GREEN')) verdict = 'YELLOW — significant sleep debt';
+						reasons.push(`sleep ${formatDuration(sleepShortfall)} short of need`);
+					} else if (sleepShortfall > 3_600_000) {
+						reasons.push(`sleep ${formatDuration(sleepShortfall)} short of need`);
+					}
+
+					if (reasons.length === 0) reasons.push('all metrics in healthy range');
+
+					let response = `# Training Readiness\n\n`;
+					response += `## Verdict: ${verdict}\n\n`;
+					response += `### Why\n${reasons.map(r => `- ${r}`).join('\n')}\n\n`;
+					response += `### Metrics\n`;
+					response += `- **Recovery**: ${rec ?? 'N/A'}% ${rec !== null ? getRecoveryZone(rec) : ''}\n`;
+					response += `- **HRV**: today ${recovery.hrv_rmssd?.toFixed(1) ?? 'N/A'} ms · 3-day avg ${avgHrv3?.toFixed(1) ?? 'N/A'} ms · 30-day baseline ${avgHrv30?.toFixed(1) ?? 'N/A'} ms`;
+					if (hrvDeviation !== null) response += ` (${hrvDeviation > 0 ? '+' : ''}${hrvDeviation.toFixed(1)}%)`;
+					response += '\n';
+					response += `- **RHR**: today ${recovery.resting_hr ?? 'N/A'} bpm · 30-day avg ${avgRhr30?.toFixed(0) ?? 'N/A'} bpm`;
+					if (rhrDeviation !== null) response += ` (${rhrDeviation > 0 ? '+' : ''}${rhrDeviation.toFixed(0)})`;
+					response += '\n';
+					if (sleep && totalNeed > 0) {
+						response += `- **Last sleep**: ${formatDuration(actualSleep)} actual · need ${formatDuration(totalNeed)}`;
+						response += sleepShortfall > 0 ? ` · ${formatDuration(sleepShortfall)} short\n` : ` · met\n`;
+					}
+					if (cycle?.strain !== null && cycle?.strain !== undefined) {
+						response += `- **Yesterday's strain**: ${cycle.strain.toFixed(1)} ${getStrainZone(cycle.strain)}\n`;
+					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_training_load': {
+					const days = validateDays(typedArgs.days);
+					const rows = db.getDailyTrainingLoad(days);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No training data available for the last ${days} days.` }] };
+					}
+
+					let response = `# Training Load (Last ${days} Days)\n\n`;
+					response += '| Date | Strain | Workouts | Sports | Next-day Recovery | Next-day HRV |\n';
+					response += '|------|--------|----------|--------|-------------------|--------------|\n';
+
+					let totalStrain = 0;
+					let highStrainDays = 0;
+
+					for (const r of rows) {
+						const strain = r.day_strain ?? 0;
+						totalStrain += strain;
+						if (strain >= 14) highStrainDays++;
+						const sports = r.workout_count === 0 ? 'rest' : (r.sports ?? '—');
+						const nextRec = r.next_recovery !== null ? `${r.next_recovery}%` : 'N/A';
+						const nextHrv = r.next_hrv !== null ? `${r.next_hrv.toFixed(1)} ms` : 'N/A';
+						response += `| ${formatDate(r.date)} | ${strain.toFixed(1)} | ${r.workout_count} | ${sports} | ${nextRec} | ${nextHrv} |\n`;
+					}
+
+					const avgStrain = totalStrain / rows.length;
+					const withRec = rows.filter(r => r.next_recovery !== null);
+					const avgRec = withRec.length > 0
+						? withRec.reduce((s, r) => s + (r.next_recovery ?? 0), 0) / withRec.length
+						: null;
+					const highRows = rows.filter(r => (r.day_strain ?? 0) >= 14 && r.next_recovery !== null);
+					const lowRows = rows.filter(r => (r.day_strain ?? 0) < 10 && r.next_recovery !== null);
+					const avgRecAfterHigh = highRows.length > 0
+						? highRows.reduce((s, r) => s + (r.next_recovery ?? 0), 0) / highRows.length
+						: null;
+					const avgRecAfterLow = lowRows.length > 0
+						? lowRows.reduce((s, r) => s + (r.next_recovery ?? 0), 0) / lowRows.length
+						: null;
+
+					response += `\n### Summary\n`;
+					response += `- **Avg daily strain**: ${avgStrain.toFixed(1)}\n`;
+					response += `- **High-strain days (≥14)**: ${highStrainDays} / ${rows.length}\n`;
+					if (avgRec !== null) response += `- **Avg next-day recovery**: ${avgRec.toFixed(0)}%\n`;
+					if (avgRecAfterHigh !== null) {
+						response += `- **Recovery after high strain (≥14)**: ${avgRecAfterHigh.toFixed(0)}% (n=${highRows.length})\n`;
+					}
+					if (avgRecAfterLow !== null) {
+						response += `- **Recovery after low strain (<10)**: ${avgRecAfterLow.toFixed(0)}% (n=${lowRows.length})\n`;
+					}
+					if (avgRecAfterHigh !== null && avgRecAfterLow !== null) {
+						const delta = avgRecAfterHigh - avgRecAfterLow;
+						response += `- **Delta**: ${delta > 0 ? '+' : ''}${delta.toFixed(0)} pp (high-strain vs low-strain recovery)\n`;
+					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_sleep_debt': {
+					const days = validateDays(typedArgs.days);
+					const rows = db.getSleepDebtTrend(days);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No sleep need data for the last ${days} days.` }] };
+					}
+
+					let response = `# Sleep Debt (Last ${days} Days)\n\n`;
+					response += '| Date | Actual | Baseline | + Debt | + Strain | Need | Short by | Perf |\n';
+					response += '|------|--------|----------|--------|----------|------|----------|------|\n';
+
+					let totalShortfall = 0;
+					let nightsShort = 0;
+
+					for (const r of rows) {
+						const short = r.shortfall_ms > 0;
+						if (short) {
+							totalShortfall += r.shortfall_ms;
+							nightsShort++;
+						}
+						response += `| ${formatDate(r.date)} `
+							+ `| ${formatDuration(r.actual_sleep_ms)} `
+							+ `| ${formatDuration(r.baseline_ms)} `
+							+ `| ${formatDuration(r.debt_ms)} `
+							+ `| ${formatDuration(r.strain_ms)} `
+							+ `| ${formatDuration(r.total_need_ms)} `
+							+ `| ${short ? formatDuration(r.shortfall_ms) : 'met'} `
+							+ `| ${r.performance?.toFixed(0) ?? 'N/A'}% |\n`;
+					}
+
+					const avgShortfall = nightsShort > 0 ? totalShortfall / nightsShort : 0;
+					const totalDebt = rows.reduce((s, r) => s + (r.debt_ms ?? 0), 0);
+					const totalStrain = rows.reduce((s, r) => s + (r.strain_ms ?? 0), 0);
+
+					response += `\n### Summary\n`;
+					response += `- **Nights short of need**: ${nightsShort} / ${rows.length}\n`;
+					if (nightsShort > 0) {
+						response += `- **Avg shortfall on short nights**: ${formatDuration(avgShortfall)}\n`;
+					}
+					response += `- **Total extra need from carried debt**: ${formatDuration(totalDebt)}\n`;
+					response += `- **Total extra need from strain**: ${formatDuration(totalStrain)}\n`;
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_profile': {
+					const tokens = db.getTokens();
+					if (!tokens) {
+						return { content: [{ type: 'text', text: 'Not authenticated with Whoop. Use get_auth_url to authorize first.' }] };
+					}
+					client.setTokens(tokens);
+
+					const [profile, body] = await Promise.all([
+						client.getProfile().catch(() => null),
+						client.getBodyMeasurement().catch(() => null),
+					]);
+
+					if (!profile && !body) {
+						return { content: [{ type: 'text', text: 'Could not fetch profile or body measurements from Whoop.' }], isError: true };
+					}
+
+					let response = '# Profile\n\n';
+					if (profile) {
+						response += `- **Name**: ${profile.first_name} ${profile.last_name}\n`;
+						response += `- **Email**: ${profile.email}\n`;
+						response += `- **User ID**: ${profile.user_id}\n`;
+					}
+					if (body) {
+						response += `\n## Body Measurements\n`;
+						response += `- **Height**: ${body.height_meter.toFixed(2)} m (${(body.height_meter * 3.28084).toFixed(2)} ft)\n`;
+						response += `- **Weight**: ${body.weight_kilogram.toFixed(1)} kg (${(body.weight_kilogram * 2.20462).toFixed(1)} lb)\n`;
+						response += `- **Max HR**: ${body.max_heart_rate} bpm\n`;
+					}
+
+					return { content: [{ type: 'text', text: response }] };
 				}
 
 				default:

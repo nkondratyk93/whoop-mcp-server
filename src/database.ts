@@ -47,6 +47,26 @@ interface StrainTrendRow {
 	calories: number;
 }
 
+interface DailyLoadRow {
+	date: string;
+	day_strain: number | null;
+	workout_count: number;
+	sports: string | null;
+	next_recovery: number | null;
+	next_hrv: number | null;
+}
+
+interface SleepDebtRow {
+	date: string;
+	actual_sleep_ms: number;
+	baseline_ms: number | null;
+	debt_ms: number | null;
+	strain_ms: number | null;
+	total_need_ms: number;
+	performance: number | null;
+	shortfall_ms: number;
+}
+
 export class WhoopDatabase {
 	private db: Database.Database;
 
@@ -436,6 +456,68 @@ export class WhoopDatabase {
 			WHERE start_time >= DATE('now', '-' || ? || ' days')
 			ORDER BY start_time DESC
 		`).all(days) as DbWorkout[];
+	}
+
+	getAvgHrv(days: number): number | null {
+		const row = this.db.prepare(`
+			SELECT AVG(hrv_rmssd) as avg FROM recovery
+			WHERE hrv_rmssd IS NOT NULL AND created_at >= DATE('now', '-' || ? || ' days')
+		`).get(days) as { avg: number | null } | undefined;
+		return row?.avg ?? null;
+	}
+
+	getAvgRhr(days: number): number | null {
+		const row = this.db.prepare(`
+			SELECT AVG(resting_hr) as avg FROM recovery
+			WHERE resting_hr IS NOT NULL AND created_at >= DATE('now', '-' || ? || ' days')
+		`).get(days) as { avg: number | null } | undefined;
+		return row?.avg ?? null;
+	}
+
+	getDailyTrainingLoad(days: number): DailyLoadRow[] {
+		return this.db.prepare(`
+			SELECT
+				DATE(c.start_time) as date,
+				c.strain as day_strain,
+				(SELECT COUNT(*) FROM workouts w
+					WHERE DATE(w.start_time) = DATE(c.start_time) AND w.strain IS NOT NULL) as workout_count,
+				(SELECT GROUP_CONCAT(DISTINCT COALESCE(sport_name, 'sport#' || sport_id))
+					FROM workouts w WHERE DATE(w.start_time) = DATE(c.start_time)) as sports,
+				(SELECT recovery_score FROM recovery r
+					WHERE DATE(r.created_at) = DATE(c.start_time, '+1 day')
+						AND r.recovery_score IS NOT NULL LIMIT 1) as next_recovery,
+				(SELECT hrv_rmssd FROM recovery r
+					WHERE DATE(r.created_at) = DATE(c.start_time, '+1 day')
+						AND r.hrv_rmssd IS NOT NULL LIMIT 1) as next_hrv
+			FROM cycles c
+			WHERE c.strain IS NOT NULL
+				AND c.start_time >= DATE('now', '-' || ? || ' days')
+			ORDER BY c.start_time DESC
+		`).all(days) as DailyLoadRow[];
+	}
+
+	getSleepDebtTrend(days: number): SleepDebtRow[] {
+		return this.db.prepare(`
+			SELECT
+				DATE(start_time) as date,
+				(COALESCE(total_in_bed_milli, 0) - COALESCE(total_awake_milli, 0)) as actual_sleep_ms,
+				sleep_needed_baseline_milli as baseline_ms,
+				sleep_needed_debt_milli as debt_ms,
+				sleep_needed_strain_milli as strain_ms,
+				(COALESCE(sleep_needed_baseline_milli, 0)
+					+ COALESCE(sleep_needed_debt_milli, 0)
+					+ COALESCE(sleep_needed_strain_milli, 0)) as total_need_ms,
+				sleep_performance as performance,
+				((COALESCE(sleep_needed_baseline_milli, 0)
+					+ COALESCE(sleep_needed_debt_milli, 0)
+					+ COALESCE(sleep_needed_strain_milli, 0))
+					- (COALESCE(total_in_bed_milli, 0) - COALESCE(total_awake_milli, 0))) as shortfall_ms
+			FROM sleep
+			WHERE is_nap = 0
+				AND sleep_needed_baseline_milli IS NOT NULL
+				AND start_time >= DATE('now', '-' || ? || ' days')
+			ORDER BY start_time DESC
+		`).all(days) as SleepDebtRow[];
 	}
 
 	getStrainTrends(days: number): StrainTrendRow[] {
