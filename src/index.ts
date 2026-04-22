@@ -342,7 +342,7 @@ function createMcpServer(): Server {
 						response += `\n`;
 						response += `- **Duration**: ${formatDuration(durationMs)}\n`;
 						response += `- **Score state**: ${w.score_state}`;
-						if (w.percent_recorded !== null) response += ` · **% recorded**: ${w.percent_recorded.toFixed(1)}%`;
+						if (w.percent_recorded !== null) response += ` · **% recorded**: ${(w.percent_recorded * 100).toFixed(1)}%`;
 						response += `\n`;
 
 						if (w.strain !== null) {
