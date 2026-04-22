@@ -62,8 +62,11 @@ interface SleepDebtRow {
 	baseline_ms: number | null;
 	debt_ms: number | null;
 	strain_ms: number | null;
+	nap_ms: number | null;
 	total_need_ms: number;
 	performance: number | null;
+	disturbances: number | null;
+	cycles: number | null;
 	shortfall_ms: number;
 }
 
@@ -117,6 +120,7 @@ export class WhoopDatabase {
 				hrv_rmssd REAL,
 				spo2 REAL,
 				skin_temp REAL,
+				user_calibrating INTEGER,
 				synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 			);
 
@@ -130,9 +134,12 @@ export class WhoopDatabase {
 				score_state TEXT NOT NULL,
 				total_in_bed_milli INTEGER,
 				total_awake_milli INTEGER,
+				total_no_data_milli INTEGER,
 				total_light_milli INTEGER,
 				total_deep_milli INTEGER,
 				total_rem_milli INTEGER,
+				sleep_cycle_count INTEGER,
+				disturbance_count INTEGER,
 				sleep_performance REAL,
 				sleep_efficiency REAL,
 				sleep_consistency REAL,
@@ -140,6 +147,7 @@ export class WhoopDatabase {
 				sleep_needed_baseline_milli INTEGER,
 				sleep_needed_debt_milli INTEGER,
 				sleep_needed_strain_milli INTEGER,
+				sleep_needed_nap_milli INTEGER,
 				synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 			);
 
@@ -180,20 +188,35 @@ export class WhoopDatabase {
 			INSERT OR IGNORE INTO sync_state (id) VALUES (1);
 		`);
 
-		const workoutCols = this.db.prepare('PRAGMA table_info(workouts)').all() as Array<{ name: string }>;
-		const haveCol = (n: string): boolean => workoutCols.some(c => c.name === n);
-		const addCol = (n: string, def: string): void => {
-			if (!haveCol(n)) this.db.exec(`ALTER TABLE workouts ADD COLUMN ${n} ${def}`);
-		};
-		addCol('sport_name', 'TEXT');
-		addCol('timezone_offset', 'TEXT');
-		addCol('percent_recorded', 'REAL');
-		addCol('created_at', 'TEXT');
-		addCol('updated_at', 'TEXT');
-		addCol('v1_id', 'INTEGER');
-		addCol('distance_meter', 'REAL');
-		addCol('altitude_gain_meter', 'REAL');
-		addCol('altitude_change_meter', 'REAL');
+		this.migrateColumns('workouts', [
+			['sport_name', 'TEXT'],
+			['timezone_offset', 'TEXT'],
+			['percent_recorded', 'REAL'],
+			['created_at', 'TEXT'],
+			['updated_at', 'TEXT'],
+			['v1_id', 'INTEGER'],
+			['distance_meter', 'REAL'],
+			['altitude_gain_meter', 'REAL'],
+			['altitude_change_meter', 'REAL'],
+		]);
+		this.migrateColumns('recovery', [
+			['user_calibrating', 'INTEGER'],
+		]);
+		this.migrateColumns('sleep', [
+			['total_no_data_milli', 'INTEGER'],
+			['sleep_cycle_count', 'INTEGER'],
+			['disturbance_count', 'INTEGER'],
+			['sleep_needed_nap_milli', 'INTEGER'],
+		]);
+	}
+
+	private migrateColumns(table: string, additions: Array<[string, string]>): void {
+		const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+		for (const [name, def] of additions) {
+			if (!cols.some(c => c.name === name)) {
+				this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
+			}
+		}
 	}
 
 	saveTokens(tokens: WhoopTokens): void {
@@ -277,12 +300,13 @@ export class WhoopDatabase {
 
 	upsertRecoveries(recoveries: WhoopRecovery[]): void {
 		const stmt = this.db.prepare(`
-			INSERT OR REPLACE INTO recovery (id, user_id, sleep_id, created_at, score_state, recovery_score, resting_hr, hrv_rmssd, spo2, skin_temp, synced_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			INSERT OR REPLACE INTO recovery (id, user_id, sleep_id, created_at, score_state, recovery_score, resting_hr, hrv_rmssd, spo2, skin_temp, user_calibrating, synced_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		`);
 
 		const insertMany = this.db.transaction((items: WhoopRecovery[]) => {
 			for (const r of items) {
+				const calibrating = r.score?.user_calibrating;
 				stmt.run(
 					r.cycle_id,
 					r.user_id,
@@ -293,7 +317,8 @@ export class WhoopDatabase {
 					r.score?.resting_heart_rate ?? null,
 					r.score?.hrv_rmssd_milli ?? null,
 					r.score?.spo2_percentage ?? null,
-					r.score?.skin_temp_celsius ?? null
+					r.score?.skin_temp_celsius ?? null,
+					calibrating === undefined ? null : (calibrating ? 1 : 0)
 				);
 			}
 		});
@@ -305,10 +330,13 @@ export class WhoopDatabase {
 		const stmt = this.db.prepare(`
 			INSERT OR REPLACE INTO sleep (
 				id, user_id, start_time, end_time, is_nap, score_state,
-				total_in_bed_milli, total_awake_milli, total_light_milli, total_deep_milli, total_rem_milli,
+				total_in_bed_milli, total_awake_milli, total_no_data_milli,
+				total_light_milli, total_deep_milli, total_rem_milli,
+				sleep_cycle_count, disturbance_count,
 				sleep_performance, sleep_efficiency, sleep_consistency, respiratory_rate,
-				sleep_needed_baseline_milli, sleep_needed_debt_milli, sleep_needed_strain_milli, synced_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				sleep_needed_baseline_milli, sleep_needed_debt_milli, sleep_needed_strain_milli, sleep_needed_nap_milli,
+				synced_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		`);
 
 		const insertMany = this.db.transaction((items: WhoopSleep[]) => {
@@ -322,16 +350,20 @@ export class WhoopDatabase {
 					s.score_state,
 					s.score?.stage_summary.total_in_bed_time_milli ?? null,
 					s.score?.stage_summary.total_awake_time_milli ?? null,
+					s.score?.stage_summary.total_no_data_time_milli ?? null,
 					s.score?.stage_summary.total_light_sleep_time_milli ?? null,
 					s.score?.stage_summary.total_slow_wave_sleep_time_milli ?? null,
 					s.score?.stage_summary.total_rem_sleep_time_milli ?? null,
+					s.score?.stage_summary.sleep_cycle_count ?? null,
+					s.score?.stage_summary.disturbance_count ?? null,
 					s.score?.sleep_performance_percentage ?? null,
 					s.score?.sleep_efficiency_percentage ?? null,
 					s.score?.sleep_consistency_percentage ?? null,
 					s.score?.respiratory_rate ?? null,
 					s.score?.sleep_needed.baseline_milli ?? null,
 					s.score?.sleep_needed.need_from_sleep_debt_milli ?? null,
-					s.score?.sleep_needed.need_from_recent_strain_milli ?? null
+					s.score?.sleep_needed.need_from_recent_strain_milli ?? null,
+					s.score?.sleep_needed.need_from_recent_nap_milli ?? null
 				);
 			}
 		});
@@ -500,18 +532,27 @@ export class WhoopDatabase {
 		return this.db.prepare(`
 			SELECT
 				DATE(start_time) as date,
-				(COALESCE(total_in_bed_milli, 0) - COALESCE(total_awake_milli, 0)) as actual_sleep_ms,
+				(COALESCE(total_in_bed_milli, 0)
+					- COALESCE(total_awake_milli, 0)
+					- COALESCE(total_no_data_milli, 0)) as actual_sleep_ms,
 				sleep_needed_baseline_milli as baseline_ms,
 				sleep_needed_debt_milli as debt_ms,
 				sleep_needed_strain_milli as strain_ms,
+				sleep_needed_nap_milli as nap_ms,
 				(COALESCE(sleep_needed_baseline_milli, 0)
 					+ COALESCE(sleep_needed_debt_milli, 0)
-					+ COALESCE(sleep_needed_strain_milli, 0)) as total_need_ms,
+					+ COALESCE(sleep_needed_strain_milli, 0)
+					+ COALESCE(sleep_needed_nap_milli, 0)) as total_need_ms,
 				sleep_performance as performance,
+				disturbance_count as disturbances,
+				sleep_cycle_count as cycles,
 				((COALESCE(sleep_needed_baseline_milli, 0)
 					+ COALESCE(sleep_needed_debt_milli, 0)
-					+ COALESCE(sleep_needed_strain_milli, 0))
-					- (COALESCE(total_in_bed_milli, 0) - COALESCE(total_awake_milli, 0))) as shortfall_ms
+					+ COALESCE(sleep_needed_strain_milli, 0)
+					+ COALESCE(sleep_needed_nap_milli, 0))
+					- (COALESCE(total_in_bed_milli, 0)
+						- COALESCE(total_awake_milli, 0)
+						- COALESCE(total_no_data_milli, 0))) as shortfall_ms
 			FROM sleep
 			WHERE is_nap = 0
 				AND sleep_needed_baseline_milli IS NOT NULL

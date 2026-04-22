@@ -234,12 +234,17 @@ function createMcpServer(): Server {
 					}
 
 					if (sleep) {
-						const totalSleep = (sleep.total_in_bed_milli ?? 0) - (sleep.total_awake_milli ?? 0);
+						const totalSleep = (sleep.total_in_bed_milli ?? 0)
+							- (sleep.total_awake_milli ?? 0)
+							- (sleep.total_no_data_milli ?? 0);
 						response += `## Last Night's Sleep\n`;
 						response += `- **Total Sleep**: ${formatDuration(totalSleep)}\n`;
 						response += `- **Performance**: ${sleep.sleep_performance?.toFixed(0) ?? 'N/A'}%\n`;
 						response += `- **Efficiency**: ${sleep.sleep_efficiency?.toFixed(0) ?? 'N/A'}%\n`;
 						response += `- **Stages**: Light ${formatDuration(sleep.total_light_milli)}, Deep ${formatDuration(sleep.total_deep_milli)}, REM ${formatDuration(sleep.total_rem_milli)}\n`;
+						if (sleep.sleep_cycle_count !== null || sleep.disturbance_count !== null) {
+							response += `- **Cycles / disturbances**: ${sleep.sleep_cycle_count ?? 'N/A'} / ${sleep.disturbance_count ?? 'N/A'}\n`;
+						}
 						if (sleep.respiratory_rate) response += `- **Respiratory Rate**: ${sleep.respiratory_rate.toFixed(1)} breaths/min\n`;
 						response += '\n';
 					}
@@ -487,12 +492,19 @@ function createMcpServer(): Server {
 
 					const totalNeed = (sleep?.sleep_needed_baseline_milli ?? 0)
 						+ (sleep?.sleep_needed_debt_milli ?? 0)
-						+ (sleep?.sleep_needed_strain_milli ?? 0);
-					const actualSleep = (sleep?.total_in_bed_milli ?? 0) - (sleep?.total_awake_milli ?? 0);
+						+ (sleep?.sleep_needed_strain_milli ?? 0)
+						+ (sleep?.sleep_needed_nap_milli ?? 0);
+					const actualSleep = (sleep?.total_in_bed_milli ?? 0)
+						- (sleep?.total_awake_milli ?? 0)
+						- (sleep?.total_no_data_milli ?? 0);
 					const sleepShortfall = totalNeed - actualSleep;
 
 					let verdict = 'GREEN — push hard';
 					const reasons: string[] = [];
+
+					if (recovery.user_calibrating === 1) {
+						reasons.push('Whoop is still calibrating your baseline — recovery score and HRV signals may be unreliable');
+					}
 
 					const rec = recovery.recovery_score;
 					if (rec !== null && rec < 34) {
@@ -568,7 +580,10 @@ function createMcpServer(): Server {
 						const strain = r.day_strain ?? 0;
 						totalStrain += strain;
 						if (strain >= 14) highStrainDays++;
-						const sports = r.workout_count === 0 ? 'rest' : (r.sports ?? '—');
+						let sports: string;
+						if (r.workout_count > 0) sports = r.sports ?? '—';
+						else if (strain < 5) sports = 'rest';
+						else sports = 'untagged activity';
 						const nextRec = r.next_recovery !== null ? `${r.next_recovery}%` : 'N/A';
 						const nextHrv = r.next_hrv !== null ? `${r.next_hrv.toFixed(1)} ms` : 'N/A';
 						response += `| ${formatDate(r.date)} | ${strain.toFixed(1)} | ${r.workout_count} | ${sports} | ${nextRec} | ${nextHrv} |\n`;
@@ -615,11 +630,17 @@ function createMcpServer(): Server {
 					}
 
 					let response = `# Sleep Debt (Last ${days} Days)\n\n`;
-					response += '| Date | Actual | Baseline | + Debt | + Strain | Need | Short by | Perf |\n';
-					response += '|------|--------|----------|--------|----------|------|----------|------|\n';
+					response += '| Date | Actual | Baseline | + Debt | + Strain | − Nap | Need | Short by | Cyc | Dist |\n';
+					response += '|------|--------|----------|--------|----------|-------|------|----------|-----|------|\n';
 
 					let totalShortfall = 0;
 					let nightsShort = 0;
+					const fmtNap = (ms: number | null): string => {
+						if (ms === null || ms === 0) return '—';
+						const abs = Math.abs(ms);
+						const sign = ms < 0 ? '-' : '+';
+						return `${sign}${formatDuration(abs)}`;
+					};
 
 					for (const r of rows) {
 						const short = r.shortfall_ms > 0;
@@ -632,14 +653,21 @@ function createMcpServer(): Server {
 							+ `| ${formatDuration(r.baseline_ms)} `
 							+ `| ${formatDuration(r.debt_ms)} `
 							+ `| ${formatDuration(r.strain_ms)} `
+							+ `| ${fmtNap(r.nap_ms)} `
 							+ `| ${formatDuration(r.total_need_ms)} `
 							+ `| ${short ? formatDuration(r.shortfall_ms) : 'met'} `
-							+ `| ${r.performance?.toFixed(0) ?? 'N/A'}% |\n`;
+							+ `| ${r.cycles ?? 'N/A'} `
+							+ `| ${r.disturbances ?? 'N/A'} |\n`;
 					}
 
 					const avgShortfall = nightsShort > 0 ? totalShortfall / nightsShort : 0;
 					const totalDebt = rows.reduce((s, r) => s + (r.debt_ms ?? 0), 0);
 					const totalStrain = rows.reduce((s, r) => s + (r.strain_ms ?? 0), 0);
+					const totalNap = rows.reduce((s, r) => s + (r.nap_ms ?? 0), 0);
+					const withDist = rows.filter(r => r.disturbances !== null);
+					const avgDist = withDist.length > 0
+						? withDist.reduce((s, r) => s + (r.disturbances ?? 0), 0) / withDist.length
+						: null;
 
 					response += `\n### Summary\n`;
 					response += `- **Nights short of need**: ${nightsShort} / ${rows.length}\n`;
@@ -648,6 +676,12 @@ function createMcpServer(): Server {
 					}
 					response += `- **Total extra need from carried debt**: ${formatDuration(totalDebt)}\n`;
 					response += `- **Total extra need from strain**: ${formatDuration(totalStrain)}\n`;
+					if (totalNap !== 0) {
+						response += `- **Total nap adjustment** (reduces need): ${formatDuration(Math.abs(totalNap))}\n`;
+					}
+					if (avgDist !== null) {
+						response += `- **Avg disturbances / night**: ${avgDist.toFixed(1)}\n`;
+					}
 
 					return { content: [{ type: 'text', text: response }] };
 				}

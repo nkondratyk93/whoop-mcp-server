@@ -144,6 +144,7 @@ export interface DbRecovery {
 	hrv_rmssd: number | null;
 	spo2: number | null;
 	skin_temp: number | null;
+	user_calibrating: number | null;
 	synced_at: string;
 }
 
@@ -157,9 +158,12 @@ export interface DbSleep {
 	score_state: string;
 	total_in_bed_milli: number | null;
 	total_awake_milli: number | null;
+	total_no_data_milli: number | null;
 	total_light_milli: number | null;
 	total_deep_milli: number | null;
 	total_rem_milli: number | null;
+	sleep_cycle_count: number | null;
+	disturbance_count: number | null;
 	sleep_performance: number | null;
 	sleep_efficiency: number | null;
 	sleep_consistency: number | null;
@@ -167,6 +171,7 @@ export interface DbSleep {
 	sleep_needed_baseline_milli: number | null;
 	sleep_needed_debt_milli: number | null;
 	sleep_needed_strain_milli: number | null;
+	sleep_needed_nap_milli: number | null;
 	synced_at: string;
 }
 
