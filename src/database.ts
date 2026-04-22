@@ -130,17 +130,21 @@ export class WhoopDatabase {
 				sport_name TEXT,
 				start_time TEXT NOT NULL,
 				end_time TEXT NOT NULL,
+				timezone_offset TEXT,
 				score_state TEXT NOT NULL,
 				strain REAL,
 				avg_hr INTEGER,
 				max_hr INTEGER,
 				kilojoule REAL,
+				percent_recorded REAL,
 				zone_zero_milli INTEGER,
 				zone_one_milli INTEGER,
 				zone_two_milli INTEGER,
 				zone_three_milli INTEGER,
 				zone_four_milli INTEGER,
 				zone_five_milli INTEGER,
+				created_at TEXT,
+				updated_at TEXT,
 				synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 			);
 
@@ -153,9 +157,15 @@ export class WhoopDatabase {
 		`);
 
 		const workoutCols = this.db.prepare('PRAGMA table_info(workouts)').all() as Array<{ name: string }>;
-		if (!workoutCols.some(c => c.name === 'sport_name')) {
-			this.db.exec('ALTER TABLE workouts ADD COLUMN sport_name TEXT');
-		}
+		const haveCol = (n: string): boolean => workoutCols.some(c => c.name === n);
+		const addCol = (n: string, def: string): void => {
+			if (!haveCol(n)) this.db.exec(`ALTER TABLE workouts ADD COLUMN ${n} ${def}`);
+		};
+		addCol('sport_name', 'TEXT');
+		addCol('timezone_offset', 'TEXT');
+		addCol('percent_recorded', 'REAL');
+		addCol('created_at', 'TEXT');
+		addCol('updated_at', 'TEXT');
 	}
 
 	saveTokens(tokens: WhoopTokens): void {
@@ -304,11 +314,11 @@ export class WhoopDatabase {
 	upsertWorkouts(workouts: WhoopWorkout[]): void {
 		const stmt = this.db.prepare(`
 			INSERT OR REPLACE INTO workouts (
-				id, user_id, sport_id, sport_name, start_time, end_time, score_state,
-				strain, avg_hr, max_hr, kilojoule,
+				id, user_id, sport_id, sport_name, start_time, end_time, timezone_offset, score_state,
+				strain, avg_hr, max_hr, kilojoule, percent_recorded,
 				zone_zero_milli, zone_one_milli, zone_two_milli, zone_three_milli, zone_four_milli, zone_five_milli,
-				synced_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				created_at, updated_at, synced_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		`);
 
 		const insertMany = this.db.transaction((items: WhoopWorkout[]) => {
@@ -320,17 +330,21 @@ export class WhoopDatabase {
 					w.sport_name ?? null,
 					w.start,
 					w.end,
+					w.timezone_offset ?? null,
 					w.score_state,
 					w.score?.strain ?? null,
 					w.score?.average_heart_rate ?? null,
 					w.score?.max_heart_rate ?? null,
 					w.score?.kilojoule ?? null,
+					w.score?.percent_recorded ?? null,
 					w.score?.zone_duration?.zone_zero_milli ?? null,
 					w.score?.zone_duration?.zone_one_milli ?? null,
 					w.score?.zone_duration?.zone_two_milli ?? null,
 					w.score?.zone_duration?.zone_three_milli ?? null,
 					w.score?.zone_duration?.zone_four_milli ?? null,
-					w.score?.zone_duration?.zone_five_milli ?? null
+					w.score?.zone_duration?.zone_five_milli ?? null,
+					w.created_at ?? null,
+					w.updated_at ?? null
 				);
 			}
 		});

@@ -173,16 +173,20 @@ export interface DbWorkout {
 	sport_name: string | null;
 	start_time: string;
 	end_time: string;
+	timezone_offset: string | null;
 	score_state: string;
 	strain: number | null;
 	avg_hr: number | null;
 	max_hr: number | null;
 	kilojoule: number | null;
+	percent_recorded: number | null;
 	zone_zero_milli: number | null;
 	zone_one_milli: number | null;
 	zone_two_milli: number | null;
 	zone_three_milli: number | null;
 	zone_four_milli: number | null;
 	zone_five_milli: number | null;
+	created_at: string | null;
+	updated_at: string | null;
 	synced_at: string;
 }

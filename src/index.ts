@@ -310,32 +310,70 @@ function createMcpServer(): Server {
 					if (minStrain !== undefined) response += ` with strain >= ${minStrain}`;
 					response += '.\n\n';
 
-					for (const w of workouts) {
-						const sport = w.sport_name ?? `Sport #${w.sport_id}`;
-						const durationMs = new Date(w.end_time).getTime() - new Date(w.start_time).getTime();
-						const dateStr = new Date(w.start_time).toLocaleString('en-US', {
+					const fmtIso = (iso: string | null): string => {
+						if (!iso) return 'N/A';
+						return new Date(iso).toLocaleString('en-US', {
 							weekday: 'short',
+							year: 'numeric',
 							month: 'short',
 							day: 'numeric',
 							hour: 'numeric',
 							minute: '2-digit',
+							hour12: false,
 						});
+					};
+					const fmtMs = (ms: number | null): string => {
+						if (ms === null) return 'N/A';
+						const m = Math.floor(ms / 60_000);
+						const s = Math.floor((ms % 60_000) / 1000);
+						return `${m}m ${s}s`;
+					};
 
-						response += `## ${sport.charAt(0).toUpperCase() + sport.slice(1)} — ${dateStr}\n`;
-						response += `- **Duration**: ${formatDuration(durationMs)}`;
-						if (w.strain !== null) response += ` · **Strain**: ${w.strain.toFixed(1)} ${getStrainZone(w.strain)}`;
-						if (w.kilojoule !== null) response += ` · **Calories**: ${Math.round(w.kilojoule / 4.184)} kcal`;
-						response += '\n';
+					for (const w of workouts) {
+						const sport = w.sport_name ?? `Sport #${w.sport_id}`;
+						const durationMs = new Date(w.end_time).getTime() - new Date(w.start_time).getTime();
 
+						response += `## ${sport.charAt(0).toUpperCase() + sport.slice(1)} — ${fmtIso(w.start_time)}\n`;
+						response += `- **ID**: \`${w.id}\` (sport_id ${w.sport_id})\n`;
+						response += `- **Start → End**: ${fmtIso(w.start_time)} → ${fmtIso(w.end_time)}`;
+						if (w.timezone_offset) response += ` (${w.timezone_offset})`;
+						response += `\n`;
+						response += `- **Duration**: ${formatDuration(durationMs)}\n`;
+						response += `- **Score state**: ${w.score_state}`;
+						if (w.percent_recorded !== null) response += ` · **% recorded**: ${w.percent_recorded.toFixed(1)}%`;
+						response += `\n`;
+
+						if (w.strain !== null) {
+							response += `- **Strain**: ${w.strain.toFixed(2)} ${getStrainZone(w.strain)}\n`;
+						}
+						if (w.kilojoule !== null) {
+							response += `- **Energy**: ${Math.round(w.kilojoule / 4.184)} kcal (${w.kilojoule.toFixed(1)} kJ)\n`;
+						}
 						if (w.avg_hr !== null || w.max_hr !== null) {
 							response += `- **HR**: avg ${w.avg_hr ?? 'N/A'} · max ${w.max_hr ?? 'N/A'} bpm\n`;
 						}
 
-						const zones = [w.zone_zero_milli, w.zone_one_milli, w.zone_two_milli, w.zone_three_milli, w.zone_four_milli, w.zone_five_milli];
-						const totalZoneMs = zones.reduce<number>((sum, z) => sum + (z ?? 0), 0);
+						const zones: Array<[string, number | null]> = [
+							['Z0', w.zone_zero_milli],
+							['Z1', w.zone_one_milli],
+							['Z2', w.zone_two_milli],
+							['Z3', w.zone_three_milli],
+							['Z4', w.zone_four_milli],
+							['Z5', w.zone_five_milli],
+						];
+						const totalZoneMs = zones.reduce<number>((sum, [, z]) => sum + (z ?? 0), 0);
 						if (totalZoneMs > 0) {
-							const pct = (ms: number | null): string => `${Math.round(((ms ?? 0) / totalZoneMs) * 100)}%`;
-							response += `- **Zones**: Z0 ${pct(w.zone_zero_milli)} · Z1 ${pct(w.zone_one_milli)} · Z2 ${pct(w.zone_two_milli)} · Z3 ${pct(w.zone_three_milli)} · Z4 ${pct(w.zone_four_milli)} · Z5 ${pct(w.zone_five_milli)}\n`;
+							const parts = zones.map(([label, ms]) => {
+								const pct = Math.round(((ms ?? 0) / totalZoneMs) * 100);
+								return `${label} ${pct}% (${fmtMs(ms)})`;
+							});
+							response += `- **HR zones**: ${parts.join(' · ')}\n`;
+						} else {
+							response += `- **HR zones**: not reported\n`;
+						}
+
+						if (w.created_at || w.updated_at) {
+							response += `- **Record**: created ${fmtIso(w.created_at)} · updated ${fmtIso(w.updated_at)}\n`;
 						}
 
 						response += '\n';
