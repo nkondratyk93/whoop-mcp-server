@@ -10,6 +10,7 @@ import { WhoopSync } from './sync.js';
 interface ToolArguments {
 	days?: number;
 	full?: boolean;
+	min_strain?: number;
 }
 
 const config = {
@@ -133,6 +134,18 @@ function createMcpServer(): Server {
 				},
 			},
 			{
+				name: 'get_workouts',
+				description: 'Get individual workout sessions with sport, duration, strain, heart rate, calories, and per-zone time breakdown.',
+				inputSchema: {
+					type: 'object',
+					properties: {
+						days: { type: 'number', description: 'Number of days to look back (default: 14, max: 90)' },
+						min_strain: { type: 'number', description: 'Only return workouts with strain >= this value' },
+					},
+					required: [],
+				},
+			},
+			{
 				name: 'sync_data',
 				description: 'Manually trigger a data sync from Whoop.',
 				inputSchema: {
@@ -154,7 +167,7 @@ function createMcpServer(): Server {
 		const typedArgs = (args ?? {}) as ToolArguments;
 
 		try {
-			const dataTools = ['get_today', 'get_recovery_trends', 'get_sleep_analysis', 'get_strain_history'];
+			const dataTools = ['get_today', 'get_recovery_trends', 'get_sleep_analysis', 'get_strain_history', 'get_workouts'];
 			if (dataTools.includes(name)) {
 				const tokens = db.getTokens();
 				if (!tokens) {
@@ -278,6 +291,55 @@ function createMcpServer(): Server {
 					const avgCalories = trends.reduce((sum, d) => sum + (d.calories || 0), 0) / trends.length;
 
 					response += `\n## Averages\n- **Daily Strain**: ${avgStrain.toFixed(1)}\n- **Daily Calories**: ${Math.round(avgCalories)} kcal\n`;
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_workouts': {
+					const days = validateDays(typedArgs.days);
+					const minStrain = typeof typedArgs.min_strain === 'number' ? typedArgs.min_strain : undefined;
+					const workouts = db.getWorkouts(days, minStrain);
+
+					if (workouts.length === 0) {
+						const filterNote = minStrain !== undefined ? ` with strain >= ${minStrain}` : '';
+						return { content: [{ type: 'text', text: `No workouts found in the last ${days} days${filterNote}.` }] };
+					}
+
+					let response = `# Workouts (Last ${days} Days)\n\n`;
+					response += `Found ${workouts.length} session${workouts.length === 1 ? '' : 's'}`;
+					if (minStrain !== undefined) response += ` with strain >= ${minStrain}`;
+					response += '.\n\n';
+
+					for (const w of workouts) {
+						const sport = w.sport_name ?? `Sport #${w.sport_id}`;
+						const durationMs = new Date(w.end_time).getTime() - new Date(w.start_time).getTime();
+						const dateStr = new Date(w.start_time).toLocaleString('en-US', {
+							weekday: 'short',
+							month: 'short',
+							day: 'numeric',
+							hour: 'numeric',
+							minute: '2-digit',
+						});
+
+						response += `## ${sport.charAt(0).toUpperCase() + sport.slice(1)} — ${dateStr}\n`;
+						response += `- **Duration**: ${formatDuration(durationMs)}`;
+						if (w.strain !== null) response += ` · **Strain**: ${w.strain.toFixed(1)} ${getStrainZone(w.strain)}`;
+						if (w.kilojoule !== null) response += ` · **Calories**: ${Math.round(w.kilojoule / 4.184)} kcal`;
+						response += '\n';
+
+						if (w.avg_hr !== null || w.max_hr !== null) {
+							response += `- **HR**: avg ${w.avg_hr ?? 'N/A'} · max ${w.max_hr ?? 'N/A'} bpm\n`;
+						}
+
+						const zones = [w.zone_zero_milli, w.zone_one_milli, w.zone_two_milli, w.zone_three_milli, w.zone_four_milli, w.zone_five_milli];
+						const totalZoneMs = zones.reduce<number>((sum, z) => sum + (z ?? 0), 0);
+						if (totalZoneMs > 0) {
+							const pct = (ms: number | null): string => `${Math.round(((ms ?? 0) / totalZoneMs) * 100)}%`;
+							response += `- **Zones**: Z0 ${pct(w.zone_zero_milli)} · Z1 ${pct(w.zone_one_milli)} · Z2 ${pct(w.zone_two_milli)} · Z3 ${pct(w.zone_three_milli)} · Z4 ${pct(w.zone_four_milli)} · Z5 ${pct(w.zone_five_milli)}\n`;
+						}
+
+						response += '\n';
+					}
 
 					return { content: [{ type: 'text', text: response }] };
 				}

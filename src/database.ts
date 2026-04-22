@@ -127,6 +127,7 @@ export class WhoopDatabase {
 				id TEXT PRIMARY KEY,
 				user_id INTEGER NOT NULL,
 				sport_id INTEGER NOT NULL,
+				sport_name TEXT,
 				start_time TEXT NOT NULL,
 				end_time TEXT NOT NULL,
 				score_state TEXT NOT NULL,
@@ -150,6 +151,11 @@ export class WhoopDatabase {
 
 			INSERT OR IGNORE INTO sync_state (id) VALUES (1);
 		`);
+
+		const workoutCols = this.db.prepare('PRAGMA table_info(workouts)').all() as Array<{ name: string }>;
+		if (!workoutCols.some(c => c.name === 'sport_name')) {
+			this.db.exec('ALTER TABLE workouts ADD COLUMN sport_name TEXT');
+		}
 	}
 
 	saveTokens(tokens: WhoopTokens): void {
@@ -298,11 +304,11 @@ export class WhoopDatabase {
 	upsertWorkouts(workouts: WhoopWorkout[]): void {
 		const stmt = this.db.prepare(`
 			INSERT OR REPLACE INTO workouts (
-				id, user_id, sport_id, start_time, end_time, score_state,
+				id, user_id, sport_id, sport_name, start_time, end_time, score_state,
 				strain, avg_hr, max_hr, kilojoule,
 				zone_zero_milli, zone_one_milli, zone_two_milli, zone_three_milli, zone_four_milli, zone_five_milli,
 				synced_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		`);
 
 		const insertMany = this.db.transaction((items: WhoopWorkout[]) => {
@@ -311,6 +317,7 @@ export class WhoopDatabase {
 					w.id,
 					w.user_id,
 					w.sport_id,
+					w.sport_name ?? null,
 					w.start,
 					w.end,
 					w.score_state,
@@ -386,6 +393,22 @@ export class WhoopDatabase {
 			WHERE is_nap = 0 AND sleep_performance IS NOT NULL AND start_time >= DATE('now', '-' || ? || ' days')
 			ORDER BY start_time DESC
 		`).all(days) as SleepTrendRow[];
+	}
+
+	getWorkouts(days: number, minStrain?: number): DbWorkout[] {
+		if (minStrain !== undefined) {
+			return this.db.prepare(`
+				SELECT * FROM workouts
+				WHERE start_time >= DATE('now', '-' || ? || ' days')
+					AND strain IS NOT NULL AND strain >= ?
+				ORDER BY start_time DESC
+			`).all(days, minStrain) as DbWorkout[];
+		}
+		return this.db.prepare(`
+			SELECT * FROM workouts
+			WHERE start_time >= DATE('now', '-' || ? || ' days')
+			ORDER BY start_time DESC
+		`).all(days) as DbWorkout[];
 	}
 
 	getStrainTrends(days: number): StrainTrendRow[] {
