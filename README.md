@@ -6,23 +6,45 @@ Built using the [Whoop Developer API v2](https://developer.whoop.com/docs/introd
 
 ## Features
 
-- **Recovery Data**: Daily recovery scores, HRV, resting heart rate, SpO2, skin temperature
-- **Sleep Analysis**: Sleep duration, stages, efficiency, performance, respiratory rate
+- **Recovery Data**: Daily recovery scores, HRV, resting heart rate, SpO2, skin temperature, calibration flag
+- **Sleep Analysis**: Sleep duration, stages, efficiency, performance, respiratory rate, sleep cycles, disturbances
+- **Sleep Debt Model**: Baseline + accumulated debt + strain-driven need, nap-adjusted, no-data-corrected
 - **Strain Tracking**: Daily strain scores, calories burned, heart rate zones
-- **Workout History**: All logged workouts with detailed metrics
-- **Auto-Sync**: Automatically keeps data fresh with smart sync logic
-- **90-Day History**: Maintains local cache of your health data for trend analysis
+- **Workout Detail**: Every captured v2 workout field — sport, duration, strain, HR, zones (ms + %), distance, elevation, % recorded, timezone, score state, record timestamps
+- **Training Readiness**: Green/yellow/red verdict from today's recovery, 3-day HRV vs 30-day baseline, RHR drift, sleep shortfall, and recent strain
+- **Training Load Correlation**: Day-by-day strain joined with next-day recovery and HRV, stratified by high-vs-low strain days
+- **Profile & Body**: Height, weight, Whoop-estimated max heart rate
+- **Auto-Sync**: Smart sync on every query, full 90-day initial pull, 7-day quick refresh thereafter
+- **90-Day History**: Local SQLite cache (encrypted tokens) for trend analysis and fast queries
 
 ## MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `get_today` | Morning briefing with recovery, sleep, and strain |
-| `get_recovery_trends` | Recovery patterns over time with HRV/RHR |
-| `get_sleep_analysis` | Sleep quality trends and stage breakdowns |
-| `get_strain_history` | Training load and calorie trends |
-| `sync_data` | Manually trigger a data sync |
-| `get_auth_url` | Get authorization URL for Whoop connection |
+### Daily briefing
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `get_today` | — | Morning briefing: recovery (+ SpO2, skin temp), last night's sleep (+ cycles, disturbances), current strain |
+| `get_readiness_brief` | — | Training readiness verdict. Combines current recovery, 3-day HRV vs 30-day baseline, RHR drift, sleep shortfall, and yesterday's strain into green/yellow/red with reasons |
+
+### Trends
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `get_recovery_trends` | `days` (1–90, default 14) | Recovery/HRV/RHR trend with averages |
+| `get_sleep_analysis` | `days` (1–90, default 14) | Sleep duration/performance/efficiency trend |
+| `get_strain_history` | `days` (1–90, default 14) | Daily strain + calories |
+| `get_sleep_debt` | `days` (1–90, default 14) | Per-night actual vs need (baseline + carried debt + strain − nap), shortfall, disturbances, cycles |
+| `get_training_load` | `days` (1–90, default 14) | Daily strain joined with next-day recovery/HRV, high-vs-low strain recovery stratification |
+
+### Workout detail
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `get_workouts` | `days` (1–90, default 14), `min_strain` (number, optional) | Every captured workout field per session: id, sport, start/end + TZ, duration, strain, HR, zones ms + %, distance, elevation, % recorded, score state, record timestamps |
+
+### Account
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `get_profile` | — | Live profile + body measurements (height, weight, max HR) |
+| `sync_data` | `full` (bool, default false) | Manually trigger a data sync; `full=true` forces a 90-day resync |
+| `get_auth_url` | — | Get authorization URL for first-time Whoop connection |
 
 ## Setup
 
@@ -86,6 +108,7 @@ npm run dev
 | `WHOOP_CLIENT_ID` | Whoop OAuth client ID | Required |
 | `WHOOP_CLIENT_SECRET` | Whoop OAuth client secret | Required |
 | `WHOOP_REDIRECT_URI` | OAuth callback URL | `http://localhost:3000/callback` |
+| `ENCRYPTION_SECRET` | Key-derivation secret for token-at-rest encryption | Falls back to `WHOOP_CLIENT_SECRET` |
 | `DB_PATH` | SQLite database path | `./whoop.db` |
 | `PORT` | HTTP server port | `3000` |
 | `MCP_MODE` | `http` for remote, `stdio` for local | `http` |
