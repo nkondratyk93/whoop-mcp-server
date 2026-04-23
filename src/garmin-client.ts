@@ -1,5 +1,12 @@
-import { GarminConnect } from 'garmin-connect';
+import { createRequire } from 'node:module';
 import type { IOauth1Token, IOauth2Token } from 'garmin-connect/dist/garmin/types.js';
+
+// garmin-connect exposes GarminConnect via Object.defineProperty, which
+// Node's cjs-module-lexer can't statically detect — so a named ESM import
+// fails at runtime. Fall through to createRequire to load the CJS module
+// directly while keeping type-safety.
+const require = createRequire(import.meta.url);
+const { GarminConnect } = require('garmin-connect') as typeof import('garmin-connect');
 
 export interface GarminTokens {
 	oauth1: IOauth1Token;
@@ -33,7 +40,7 @@ interface GarminClientConfig {
 }
 
 export class GarminClient {
-	private gc: GarminConnect;
+	private gc: InstanceType<typeof GarminConnect>;
 	private readonly email: string;
 	private readonly password: string;
 	private readonly onTokensChange?: (tokens: GarminTokens) => void;
