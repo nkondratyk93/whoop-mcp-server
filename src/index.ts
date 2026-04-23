@@ -20,6 +20,7 @@ const config = {
 	dbPath: process.env.DB_PATH ?? './whoop.db',
 	port: Number.parseInt(process.env.PORT ?? '3000', 10),
 	mode: process.env.MCP_MODE ?? 'http',
+	healthkitToken: process.env.HEALTHKIT_TOKEN ?? '',
 };
 
 const db = new WhoopDatabase(config.dbPath);
@@ -187,6 +188,29 @@ function createMcpServer(): Server {
 				description: 'Get the authenticated user profile and body measurements (height, weight, max heart rate) from Whoop.',
 				inputSchema: { type: 'object', properties: {}, required: [] },
 			},
+			{
+				name: 'get_nutrition_today',
+				description: 'Today\'s nutrition from Apple Health (via Health Auto Export): total kcal, protein, carbs, fat, plus the individual entries.',
+				inputSchema: { type: 'object', properties: {}, required: [] },
+			},
+			{
+				name: 'get_nutrition_trend',
+				description: 'Daily nutrition rollup from Apple Health (kcal, protein, carbs, fat) over the requested window.',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
+					required: [],
+				},
+			},
+			{
+				name: 'get_energy_balance',
+				description: 'Day-by-day energy balance: Whoop kcal burned vs Apple Health kcal consumed, with deficit/surplus and protein per kg of body weight.',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
+					required: [],
+				},
+			},
 		],
 	}));
 
@@ -198,6 +222,7 @@ function createMcpServer(): Server {
 			const dataTools = [
 				'get_today', 'get_recovery_trends', 'get_sleep_analysis', 'get_strain_history',
 				'get_workouts', 'get_readiness_brief', 'get_training_load', 'get_sleep_debt',
+				'get_energy_balance',
 			];
 			if (dataTools.includes(name)) {
 				const tokens = db.getTokens();
@@ -718,6 +743,147 @@ function createMcpServer(): Server {
 					return { content: [{ type: 'text', text: response }] };
 				}
 
+				case 'get_nutrition_today': {
+					const metrics = ['dietary_energy', 'protein', 'carbohydrates', 'total_fat'];
+					const totals = db.getHealthkitDailyTotals(1, metrics);
+					const today = new Date().toISOString().slice(0, 10);
+					const todayRows = totals.filter(t => t.date === today);
+
+					if (todayRows.length === 0) {
+						return { content: [{ type: 'text', text: `No nutrition data received for today (${today}) yet.` }] };
+					}
+
+					const byMetric = new Map(todayRows.map(r => [r.metric, r]));
+					const kcal = byMetric.get('dietary_energy');
+					const protein = byMetric.get('protein');
+					const carbs = byMetric.get('carbohydrates');
+					const fat = byMetric.get('total_fat');
+
+					let response = `# Nutrition Today (${today})\n\n`;
+					if (kcal) response += `- **Energy**: ${kcal.total.toFixed(0)} kcal (${kcal.count} entries)\n`;
+					if (protein) response += `- **Protein**: ${protein.total.toFixed(1)} g\n`;
+					if (carbs) response += `- **Carbs**: ${carbs.total.toFixed(1)} g\n`;
+					if (fat) response += `- **Fat**: ${fat.total.toFixed(1)} g\n`;
+
+					const kcalEntries = db.getHealthkitSamples('dietary_energy', 1)
+						.filter(e => e.date.startsWith(today));
+					if (kcalEntries.length > 0) {
+						response += `\n### Entries\n`;
+						for (const e of kcalEntries) {
+							const t = new Date(e.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+							response += `- ${t} — ${e.qty.toFixed(0)} kcal\n`;
+						}
+					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_nutrition_trend': {
+					const days = validateDays(typedArgs.days);
+					const metrics = ['dietary_energy', 'protein', 'carbohydrates', 'total_fat'];
+					const rows = db.getHealthkitDailyTotals(days, metrics);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No nutrition data in the last ${days} days.` }] };
+					}
+
+					const byDate = new Map<string, { kcal: number | null; protein: number | null; carbs: number | null; fat: number | null }>();
+					for (const r of rows) {
+						if (!byDate.has(r.date)) byDate.set(r.date, { kcal: null, protein: null, carbs: null, fat: null });
+						const d = byDate.get(r.date)!;
+						if (r.metric === 'dietary_energy') d.kcal = r.total;
+						else if (r.metric === 'protein') d.protein = r.total;
+						else if (r.metric === 'carbohydrates') d.carbs = r.total;
+						else if (r.metric === 'total_fat') d.fat = r.total;
+					}
+
+					let response = `# Nutrition (Last ${days} Days)\n\n`;
+					response += '| Date | kcal | Protein | Carbs | Fat |\n|------|------|---------|-------|-----|\n';
+					const fmt = (v: number | null, unit: string): string => v === null ? 'N/A' : `${v.toFixed(unit === 'kcal' ? 0 : 1)} ${unit}`;
+
+					let kSum = 0, pSum = 0, cSum = 0, fSum = 0;
+					let kCount = 0, pCount = 0, cCount = 0, fCount = 0;
+					const sortedDates = Array.from(byDate.keys()).sort().reverse();
+					for (const date of sortedDates) {
+						const d = byDate.get(date)!;
+						response += `| ${formatDate(date)} | ${fmt(d.kcal, 'kcal')} | ${fmt(d.protein, 'g')} | ${fmt(d.carbs, 'g')} | ${fmt(d.fat, 'g')} |\n`;
+						if (d.kcal !== null) { kSum += d.kcal; kCount++; }
+						if (d.protein !== null) { pSum += d.protein; pCount++; }
+						if (d.carbs !== null) { cSum += d.carbs; cCount++; }
+						if (d.fat !== null) { fSum += d.fat; fCount++; }
+					}
+
+					response += `\n### Averages\n`;
+					if (kCount > 0) response += `- **kcal**: ${(kSum / kCount).toFixed(0)} / day (n=${kCount})\n`;
+					if (pCount > 0) response += `- **Protein**: ${(pSum / pCount).toFixed(1)} g / day\n`;
+					if (cCount > 0) response += `- **Carbs**: ${(cSum / cCount).toFixed(1)} g / day\n`;
+					if (fCount > 0) response += `- **Fat**: ${(fSum / fCount).toFixed(1)} g / day\n`;
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_energy_balance': {
+					const days = validateDays(typedArgs.days);
+					const rows = db.getEnergyBalance(days);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No Whoop cycle data in the last ${days} days.` }] };
+					}
+
+					let weightKg: number | null = null;
+					try {
+						const body = await client.getBodyMeasurement();
+						weightKg = body.weight_kilogram;
+					} catch {
+						// ignore — we'll just skip protein/kg column
+					}
+
+					let response = `# Energy Balance (Last ${days} Days)\n\n`;
+					response += '| Date | kcal Out | kcal In | Balance | Protein';
+					if (weightKg !== null) response += ' | g/kg';
+					response += ' |\n|------|----------|---------|---------|---------';
+					if (weightKg !== null) response += '|------';
+					response += '|\n';
+
+					const rowsWithBoth = rows.filter(r => r.kcal_in !== null && r.kcal_out !== null);
+					let totalDeficit = 0;
+					for (const r of rows) {
+						const kOut = r.kcal_out !== null ? `${r.kcal_out.toFixed(0)}` : 'N/A';
+						const kIn = r.kcal_in !== null ? `${r.kcal_in.toFixed(0)}` : 'N/A';
+						let balanceCell = 'N/A';
+						if (r.kcal_in !== null && r.kcal_out !== null) {
+							const delta = r.kcal_in - r.kcal_out;
+							totalDeficit += delta;
+							balanceCell = `${delta > 0 ? '+' : ''}${delta.toFixed(0)}`;
+						}
+						const p = r.protein_g !== null ? `${r.protein_g.toFixed(0)} g` : 'N/A';
+						let line = `| ${formatDate(r.date)} | ${kOut} | ${kIn} | ${balanceCell} | ${p}`;
+						if (weightKg !== null) {
+							const perKg = r.protein_g !== null ? (r.protein_g / weightKg).toFixed(2) : 'N/A';
+							line += ` | ${perKg}`;
+						}
+						line += ' |\n';
+						response += line;
+					}
+
+					response += `\n### Summary\n`;
+					response += `- **Days with both Whoop + nutrition data**: ${rowsWithBoth.length} / ${rows.length}\n`;
+					if (rowsWithBoth.length > 0) {
+						const avgDelta = totalDeficit / rowsWithBoth.length;
+						response += `- **Avg daily balance**: ${avgDelta > 0 ? '+' : ''}${avgDelta.toFixed(0)} kcal ${avgDelta > 0 ? '(surplus)' : '(deficit)'}\n`;
+						response += `- **Cumulative balance**: ${totalDeficit > 0 ? '+' : ''}${totalDeficit.toFixed(0)} kcal over ${rowsWithBoth.length} days\n`;
+					}
+					if (weightKg !== null) {
+						const withProtein = rows.filter(r => r.protein_g !== null);
+						if (withProtein.length > 0) {
+							const avgProteinPerKg = withProtein.reduce((s, r) => s + (r.protein_g ?? 0), 0) / withProtein.length / weightKg;
+							response += `- **Avg protein**: ${avgProteinPerKg.toFixed(2)} g/kg/day (target for strength: 1.6–2.2)\n`;
+						}
+					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
 				default:
 					throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
 			}
@@ -759,6 +925,39 @@ async function main(): Promise<void> {
 
 		app.get('/health', (_req: Request, res: Response) => {
 			res.json({ status: 'ok', authenticated: Boolean(db.getTokens()) });
+		});
+
+		app.post('/healthkit', express.json({ limit: '10mb' }), (req: Request, res: Response) => {
+			if (!config.healthkitToken) {
+				res.status(503).json({ error: 'HEALTHKIT_TOKEN not configured on server' });
+				return;
+			}
+			const auth = req.headers.authorization;
+			if (auth !== `Bearer ${config.healthkitToken}`) {
+				res.status(401).json({ error: 'unauthorized' });
+				return;
+			}
+
+			const body = req.body as { data?: { metrics?: Array<{ name?: string; units?: string; data?: Array<{ qty?: number; date?: string }> }> } };
+			const metrics = body?.data?.metrics;
+			if (!Array.isArray(metrics)) {
+				res.status(400).json({ error: 'expected { data: { metrics: [...] } }' });
+				return;
+			}
+
+			const samples: Array<{ metric: string; date: string; qty: number; units: string | null }> = [];
+			for (const m of metrics) {
+				if (!m?.name || !Array.isArray(m.data)) continue;
+				for (const entry of m.data) {
+					if (typeof entry?.qty !== 'number' || typeof entry?.date !== 'string') continue;
+					const iso = new Date(entry.date).toISOString();
+					if (Number.isNaN(new Date(iso).getTime())) continue;
+					samples.push({ metric: m.name, date: iso, qty: entry.qty, units: m.units ?? null });
+				}
+			}
+
+			const inserted = db.upsertHealthkitSamples(samples);
+			res.json({ received: samples.length, inserted, skipped: samples.length - inserted });
 		});
 
 		app.all('/mcp', async (req: Request, res: Response) => {

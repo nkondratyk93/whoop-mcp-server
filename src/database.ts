@@ -180,10 +180,20 @@ export class WhoopDatabase {
 				synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 			);
 
+			CREATE TABLE IF NOT EXISTS healthkit_samples (
+				metric TEXT NOT NULL,
+				date TEXT NOT NULL,
+				qty REAL NOT NULL,
+				units TEXT,
+				received_at TEXT DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (metric, date, qty)
+			);
+
 			CREATE INDEX IF NOT EXISTS idx_cycles_start ON cycles(start_time);
 			CREATE INDEX IF NOT EXISTS idx_recovery_created ON recovery(created_at);
 			CREATE INDEX IF NOT EXISTS idx_sleep_start ON sleep(start_time);
 			CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_time);
+			CREATE INDEX IF NOT EXISTS idx_hk_metric_date ON healthkit_samples(metric, date);
 
 			INSERT OR IGNORE INTO sync_state (id) VALUES (1);
 		`);
@@ -568,6 +578,70 @@ export class WhoopDatabase {
 			WHERE strain IS NOT NULL AND start_time >= DATE('now', '-' || ? || ' days')
 			ORDER BY start_time DESC
 		`).all(days) as StrainTrendRow[];
+	}
+
+	upsertHealthkitSamples(samples: Array<{ metric: string; date: string; qty: number; units: string | null }>): number {
+		const stmt = this.db.prepare(`
+			INSERT OR IGNORE INTO healthkit_samples (metric, date, qty, units, received_at)
+			VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`);
+		let inserted = 0;
+		const tx = this.db.transaction((items: typeof samples) => {
+			for (const s of items) {
+				const res = stmt.run(s.metric, s.date, s.qty, s.units);
+				inserted += res.changes;
+			}
+		});
+		tx(samples);
+		return inserted;
+	}
+
+	getHealthkitDailyTotals(days: number, metrics: string[]): Array<{ date: string; metric: string; total: number; count: number }> {
+		if (metrics.length === 0) return [];
+		const placeholders = metrics.map(() => '?').join(',');
+		return this.db.prepare(`
+			SELECT DATE(date) as date, metric, SUM(qty) as total, COUNT(*) as count
+			FROM healthkit_samples
+			WHERE metric IN (${placeholders})
+				AND DATE(date) >= DATE('now', '-' || ? || ' days')
+			GROUP BY DATE(date), metric
+			ORDER BY DATE(date) DESC, metric
+		`).all(...metrics, days) as Array<{ date: string; metric: string; total: number; count: number }>;
+	}
+
+	getHealthkitSamples(metric: string, days: number): Array<{ date: string; qty: number; units: string | null }> {
+		return this.db.prepare(`
+			SELECT date, qty, units FROM healthkit_samples
+			WHERE metric = ? AND DATE(date) >= DATE('now', '-' || ? || ' days')
+			ORDER BY date DESC
+		`).all(metric, days) as Array<{ date: string; qty: number; units: string | null }>;
+	}
+
+	getEnergyBalance(days: number): Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }> {
+		return this.db.prepare(`
+			WITH d AS (
+				SELECT DATE(start_time) as date, ROUND(kilojoule / 4.184, 0) as kcal_out
+				FROM cycles
+				WHERE kilojoule IS NOT NULL AND start_time >= DATE('now', '-' || ? || ' days')
+			),
+			kcal_in AS (
+				SELECT DATE(date) as date, SUM(qty) as total
+				FROM healthkit_samples WHERE metric = 'dietary_energy'
+					AND DATE(date) >= DATE('now', '-' || ? || ' days')
+				GROUP BY DATE(date)
+			),
+			protein AS (
+				SELECT DATE(date) as date, SUM(qty) as total
+				FROM healthkit_samples WHERE metric = 'protein'
+					AND DATE(date) >= DATE('now', '-' || ? || ' days')
+				GROUP BY DATE(date)
+			)
+			SELECT d.date, kcal_in.total as kcal_in, d.kcal_out, protein.total as protein_g
+			FROM d
+			LEFT JOIN kcal_in ON kcal_in.date = d.date
+			LEFT JOIN protein ON protein.date = d.date
+			ORDER BY d.date DESC
+		`).all(days, days, days) as Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }>;
 	}
 
 	close(): void {
