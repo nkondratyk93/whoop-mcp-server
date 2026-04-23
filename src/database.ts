@@ -189,11 +189,43 @@ export class WhoopDatabase {
 				PRIMARY KEY (metric, date, qty)
 			);
 
+			CREATE TABLE IF NOT EXISTS garmin_tokens (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				oauth1_token TEXT NOT NULL,
+				oauth2_token TEXT NOT NULL,
+				updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+			);
+
+			CREATE TABLE IF NOT EXISTS garmin_body_composition (
+				sample_pk INTEGER PRIMARY KEY,
+				calendar_date TEXT NOT NULL,
+				timestamp_gmt INTEGER NOT NULL,
+				weight_g REAL NOT NULL,
+				bmi REAL,
+				body_fat_pct REAL,
+				body_water_pct REAL,
+				bone_mass_g REAL,
+				muscle_mass_g REAL,
+				physique_rating INTEGER,
+				visceral_fat INTEGER,
+				metabolic_age INTEGER,
+				source_type TEXT,
+				synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+			);
+
+			CREATE TABLE IF NOT EXISTS garmin_sync_state (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				body_comp_synced_at TEXT
+			);
+
 			CREATE INDEX IF NOT EXISTS idx_cycles_start ON cycles(start_time);
 			CREATE INDEX IF NOT EXISTS idx_recovery_created ON recovery(created_at);
 			CREATE INDEX IF NOT EXISTS idx_sleep_start ON sleep(start_time);
 			CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_time);
 			CREATE INDEX IF NOT EXISTS idx_hk_metric_date ON healthkit_samples(metric, date);
+			CREATE INDEX IF NOT EXISTS idx_garmin_bc_date ON garmin_body_composition(calendar_date);
+
+			INSERT OR IGNORE INTO garmin_sync_state (id) VALUES (1);
 
 			INSERT OR IGNORE INTO sync_state (id) VALUES (1);
 		`);
@@ -667,6 +699,112 @@ export class WhoopDatabase {
 			FROM windowed w
 			ORDER BY w.start_dt DESC
 		`).all(days) as Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }>;
+	}
+
+	saveGarminTokens(oauth1: unknown, oauth2: unknown): void {
+		const a = encrypt(JSON.stringify(oauth1));
+		const b = encrypt(JSON.stringify(oauth2));
+		this.db.prepare(`
+			INSERT OR REPLACE INTO garmin_tokens (id, oauth1_token, oauth2_token, updated_at)
+			VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+		`).run(a, b);
+	}
+
+	getGarminTokens(): { oauth1: unknown; oauth2: unknown } | null {
+		const row = this.db.prepare('SELECT oauth1_token, oauth2_token FROM garmin_tokens WHERE id = 1').get() as
+			{ oauth1_token: string; oauth2_token: string } | undefined;
+		if (!row) return null;
+		const a = isEncrypted(row.oauth1_token) ? decrypt(row.oauth1_token) : row.oauth1_token;
+		const b = isEncrypted(row.oauth2_token) ? decrypt(row.oauth2_token) : row.oauth2_token;
+		return { oauth1: JSON.parse(a), oauth2: JSON.parse(b) };
+	}
+
+	upsertGarminBodyComposition(entries: Array<{
+		samplePk: number;
+		calendarDate: string;
+		timestampGMT: number;
+		weight: number;
+		bmi: number | null;
+		bodyFat: number | null;
+		bodyWater: number | null;
+		boneMass: number | null;
+		muscleMass: number | null;
+		physiqueRating: number | null;
+		visceralFat: number | null;
+		metabolicAge: number | null;
+		sourceType: string;
+	}>): number {
+		const stmt = this.db.prepare(`
+			INSERT OR REPLACE INTO garmin_body_composition
+				(sample_pk, calendar_date, timestamp_gmt, weight_g, bmi, body_fat_pct, body_water_pct,
+				 bone_mass_g, muscle_mass_g, physique_rating, visceral_fat, metabolic_age, source_type, synced_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`);
+		const tx = this.db.transaction((items: typeof entries) => {
+			for (const e of items) {
+				stmt.run(
+					e.samplePk, e.calendarDate, e.timestampGMT, e.weight,
+					e.bmi, e.bodyFat, e.bodyWater, e.boneMass, e.muscleMass,
+					e.physiqueRating, e.visceralFat, e.metabolicAge, e.sourceType
+				);
+			}
+		});
+		tx(entries);
+		this.db.prepare('UPDATE garmin_sync_state SET body_comp_synced_at = CURRENT_TIMESTAMP WHERE id = 1').run();
+		return entries.length;
+	}
+
+	getGarminBodyCompositionSyncedAt(): string | null {
+		const row = this.db.prepare('SELECT body_comp_synced_at FROM garmin_sync_state WHERE id = 1').get() as
+			{ body_comp_synced_at: string | null } | undefined;
+		return row?.body_comp_synced_at ?? null;
+	}
+
+	getGarminBodyComposition(days: number): Array<{
+		calendar_date: string;
+		timestamp_gmt: number;
+		weight_kg: number;
+		bmi: number | null;
+		body_fat_pct: number | null;
+		body_water_pct: number | null;
+		bone_mass_kg: number | null;
+		muscle_mass_kg: number | null;
+		physique_rating: number | null;
+		visceral_fat: number | null;
+		metabolic_age: number | null;
+		source_type: string;
+	}> {
+		return this.db.prepare(`
+			SELECT
+				calendar_date,
+				timestamp_gmt,
+				weight_g / 1000.0 as weight_kg,
+				bmi,
+				body_fat_pct,
+				body_water_pct,
+				bone_mass_g / 1000.0 as bone_mass_kg,
+				muscle_mass_g / 1000.0 as muscle_mass_kg,
+				physique_rating,
+				visceral_fat,
+				metabolic_age,
+				source_type
+			FROM garmin_body_composition
+			WHERE calendar_date >= DATE('now', '-' || ? || ' days')
+			ORDER BY timestamp_gmt DESC
+		`).all(days) as Array<{
+			calendar_date: string;
+			timestamp_gmt: number;
+			weight_kg: number;
+			bmi: number | null;
+			body_fat_pct: number | null;
+			body_water_pct: number | null;
+			bone_mass_kg: number | null;
+			muscle_mass_kg: number | null;
+			physique_rating: number | null;
+			visceral_fat: number | null;
+			metabolic_age: number | null;
+			source_type: string;
+		}>;
 	}
 
 	close(): void {

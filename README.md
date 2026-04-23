@@ -49,6 +49,11 @@ Built using the [Whoop Developer API v2](https://developer.whoop.com/docs/introd
 | `get_daily_activity` | `days` (1–90, default 14) | Steps, walking distance, flights climbed — NEAT signal that complements `get_training_load` |
 | `get_gait_metrics` | `days` (1–90, default 14) | Walking speed, step length, asymmetry %, double-support %. Injury-prevention signal |
 
+### Garmin (via Garmin Connect, requires GARMIN_EMAIL / GARMIN_PASSWORD)
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `get_body_composition` | `days` (1–90, default 30) | Body composition trend from the Garmin Index scale: weight, BMI, body fat %, muscle mass, bone mass, body water %. Rolling 7/30-day averages and week-over-week delta |
+
 ### Account
 | Tool | Arguments | Description |
 |------|-----------|-------------|
@@ -120,6 +125,8 @@ npm run dev
 | `WHOOP_REDIRECT_URI` | OAuth callback URL | `http://localhost:3000/callback` |
 | `ENCRYPTION_SECRET` | Key-derivation secret for token-at-rest encryption | Falls back to `WHOOP_CLIENT_SECRET` |
 | `HEALTHKIT_TOKEN` | Bearer token required on `POST /healthkit` from Health Auto Export | Optional; unset = endpoint returns 503 |
+| `GARMIN_EMAIL` | Email for Garmin Connect login (unofficial, reverse-engineered auth — disable MFA on the Garmin account) | Optional; unset = Garmin tools return "not configured" |
+| `GARMIN_PASSWORD` | Password for Garmin Connect login; encrypted OAuth tokens are cached after first successful login | Optional |
 | `DB_PATH` | SQLite database path | `./whoop.db` |
 | `PORT` | HTTP server port | `3000` |
 | `MCP_MODE` | `http` for remote, `stdio` for local | `http` |

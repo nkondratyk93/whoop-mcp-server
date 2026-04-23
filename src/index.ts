@@ -6,6 +6,7 @@ import express, { type Request, type Response } from 'express';
 import { WhoopClient } from './whoop-client.js';
 import { WhoopDatabase } from './database.js';
 import { WhoopSync } from './sync.js';
+import { GarminClient } from './garmin-client.js';
 
 interface ToolArguments {
 	days?: number;
@@ -21,6 +22,8 @@ const config = {
 	port: Number.parseInt(process.env.PORT ?? '3000', 10),
 	mode: process.env.MCP_MODE ?? 'http',
 	healthkitToken: process.env.HEALTHKIT_TOKEN ?? '',
+	garminEmail: process.env.GARMIN_EMAIL ?? '',
+	garminPassword: process.env.GARMIN_PASSWORD ?? '',
 };
 
 const db = new WhoopDatabase(config.dbPath);
@@ -37,6 +40,44 @@ if (existingTokens) {
 }
 
 const sync = new WhoopSync(client, db);
+
+const garminClient: GarminClient | null = config.garminEmail && config.garminPassword
+	? new GarminClient({
+		email: config.garminEmail,
+		password: config.garminPassword,
+		onTokensChange: tokens => db.saveGarminTokens(tokens.oauth1, tokens.oauth2),
+	})
+	: null;
+
+if (garminClient) {
+	const saved = db.getGarminTokens();
+	if (saved) {
+		try {
+			garminClient.loadTokens({ oauth1: saved.oauth1 as never, oauth2: saved.oauth2 as never });
+		} catch {
+			// tokens unusable; ensureLoggedIn will re-login on demand
+		}
+	}
+}
+
+const GARMIN_SYNC_COOLDOWN_MS = 60 * 60 * 1000;
+
+async function syncGarminBodyComposition(days: number): Promise<number> {
+	if (!garminClient) throw new Error('Garmin not configured (set GARMIN_EMAIL and GARMIN_PASSWORD)');
+	const entries = await garminClient.getWeightRange(days);
+	if (entries.length > 0) db.upsertGarminBodyComposition(entries);
+	return entries.length;
+}
+
+async function garminBodyCompSmartSync(days = 30): Promise<void> {
+	if (!garminClient) return;
+	const last = db.getGarminBodyCompositionSyncedAt();
+	if (last) {
+		const ms = Date.now() - new Date(last + 'Z').getTime();
+		if (ms < GARMIN_SYNC_COOLDOWN_MS) return;
+	}
+	await syncGarminBodyComposition(days);
+}
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const transports = new Map<string, { transport: StreamableHTTPServerTransport; lastAccess: number }>();
@@ -226,6 +267,15 @@ function createMcpServer(): Server {
 				inputSchema: {
 					type: 'object',
 					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
+					required: [],
+				},
+			},
+			{
+				name: 'get_body_composition',
+				description: 'Body composition trend from the Garmin Index smart scale: weight, BMI, body fat %, body water %, muscle mass, bone mass, physique / visceral / metabolic-age where available. Includes rolling 7/30-day averages and a week-over-week delta so bulk/cut decisions have a real trend.',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 30, max: 90)' } },
 					required: [],
 				},
 			},
@@ -1073,6 +1123,78 @@ function createMcpServer(): Server {
 					if (deltas.length > 0) {
 						const avgDelta = deltas.reduce((s, v) => s + v, 0) / deltas.length;
 						response += `- **Avg Apple − Whoop**: ${avgDelta > 0 ? '+' : ''}${avgDelta.toFixed(0)} kcal (${avgDelta > 0 ? 'Apple higher' : 'Whoop higher'})\n`;
+					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_body_composition': {
+					if (!garminClient) {
+						return { content: [{ type: 'text', text: 'Garmin not configured. Set GARMIN_EMAIL and GARMIN_PASSWORD env vars on the server.' }] };
+					}
+					const days = validateDays(typedArgs.days ?? 30);
+					try {
+						await garminBodyCompSmartSync(Math.max(days, 30));
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						return { content: [{ type: 'text', text: `Garmin sync failed: ${message}` }], isError: true };
+					}
+
+					const rows = db.getGarminBodyComposition(days);
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No body composition data from Garmin in the last ${days} days. Confirm you've weighed in on the Index scale recently.` }] };
+					}
+
+					let response = `# Body Composition (Last ${days} Days)\n\n`;
+					response += '| Date | Weight (kg) | BMI | Body Fat % | Muscle Mass (kg) | Bone Mass (kg) | Body Water % |\n';
+					response += '|------|-------------|-----|------------|------------------|----------------|--------------|\n';
+
+					const oneEntryPerDay = new Map<string, typeof rows[number]>();
+					for (const r of rows) {
+						const existing = oneEntryPerDay.get(r.calendar_date);
+						if (!existing || r.timestamp_gmt > existing.timestamp_gmt) {
+							oneEntryPerDay.set(r.calendar_date, r);
+						}
+					}
+					const daily = Array.from(oneEntryPerDay.values()).sort((a, b) => b.timestamp_gmt - a.timestamp_gmt);
+
+					for (const r of daily) {
+						response += `| ${formatDate(r.calendar_date)} `
+							+ `| ${r.weight_kg.toFixed(1)} `
+							+ `| ${r.bmi !== null ? r.bmi.toFixed(1) : 'N/A'} `
+							+ `| ${r.body_fat_pct !== null ? r.body_fat_pct.toFixed(1) + '%' : 'N/A'} `
+							+ `| ${r.muscle_mass_kg !== null ? r.muscle_mass_kg.toFixed(1) : 'N/A'} `
+							+ `| ${r.bone_mass_kg !== null ? r.bone_mass_kg.toFixed(2) : 'N/A'} `
+							+ `| ${r.body_water_pct !== null ? r.body_water_pct.toFixed(1) + '%' : 'N/A'} |\n`;
+					}
+
+					const weights = daily.map(r => r.weight_kg);
+					const avg = (arr: number[]): number => arr.length > 0 ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
+					const recent7 = weights.slice(0, Math.min(7, weights.length));
+					const recent30 = weights.slice(0, Math.min(30, weights.length));
+					const older7 = weights.slice(7, 14);
+
+					response += `\n### Summary\n`;
+					response += `- **Weigh-ins**: ${daily.length} days (${rows.length} total samples)\n`;
+					if (recent7.length > 0) response += `- **7-day avg weight**: ${avg(recent7).toFixed(2)} kg\n`;
+					if (recent30.length >= 7) response += `- **30-day avg weight**: ${avg(recent30).toFixed(2)} kg\n`;
+					if (recent7.length >= 3 && older7.length >= 3) {
+						const delta = avg(recent7) - avg(older7);
+						const direction = delta > 0.1 ? 'gaining' : delta < -0.1 ? 'losing' : 'steady';
+						response += `- **Week-over-week delta**: ${delta > 0 ? '+' : ''}${delta.toFixed(2)} kg (${direction})\n`;
+					}
+					const bfs = daily.map(r => r.body_fat_pct).filter((v): v is number => v !== null);
+					if (bfs.length > 0) response += `- **Avg body fat**: ${avg(bfs).toFixed(1)}%\n`;
+					const muscles = daily.map(r => r.muscle_mass_kg).filter((v): v is number => v !== null);
+					if (muscles.length >= 3) {
+						const recentMuscle = avg(muscles.slice(0, 7));
+						const olderMuscle = muscles.length >= 14 ? avg(muscles.slice(7, 14)) : null;
+						response += `- **Latest muscle mass**: ${muscles[0].toFixed(1)} kg`;
+						if (olderMuscle !== null) {
+							const mDelta = recentMuscle - olderMuscle;
+							response += ` (${mDelta > 0 ? '+' : ''}${mDelta.toFixed(2)} kg week-over-week)`;
+						}
+						response += '\n';
 					}
 
 					return { content: [{ type: 'text', text: response }] };
