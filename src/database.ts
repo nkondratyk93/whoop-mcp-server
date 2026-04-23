@@ -609,6 +609,29 @@ export class WhoopDatabase {
 		`).all(...metrics, days) as Array<{ date: string; metric: string; total: number; count: number; units: string | null }>;
 	}
 
+	getHealthkitDailyAvg(days: number, metrics: string[]): Array<{ date: string; metric: string; avg: number; count: number; units: string | null }> {
+		if (metrics.length === 0) return [];
+		const placeholders = metrics.map(() => '?').join(',');
+		return this.db.prepare(`
+			SELECT DATE(date) as date, metric, AVG(qty) as avg, COUNT(*) as count, MAX(units) as units
+			FROM healthkit_samples
+			WHERE metric IN (${placeholders})
+				AND DATE(date) >= DATE('now', '-' || ? || ' days')
+			GROUP BY DATE(date), metric
+			ORDER BY DATE(date) DESC, metric
+		`).all(...metrics, days) as Array<{ date: string; metric: string; avg: number; count: number; units: string | null }>;
+	}
+
+	getHealthkitDayTotal(metric: string, daysAgo: number): { total: number; units: string | null } | null {
+		const row = this.db.prepare(`
+			SELECT SUM(qty) as total, MAX(units) as units
+			FROM healthkit_samples
+			WHERE metric = ? AND DATE(date) = DATE('now', '-' || ? || ' days')
+		`).get(metric, daysAgo) as { total: number | null; units: string | null } | undefined;
+		if (!row || row.total === null) return null;
+		return { total: row.total, units: row.units };
+	}
+
 	getHealthkitSamples(metric: string, days: number): Array<{ date: string; qty: number; units: string | null }> {
 		return this.db.prepare(`
 			SELECT date, qty, units FROM healthkit_samples

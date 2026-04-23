@@ -211,6 +211,24 @@ function createMcpServer(): Server {
 					required: [],
 				},
 			},
+			{
+				name: 'get_body_composition',
+				description: 'Body weight, body fat percentage, and VO2 max from Apple Health, with 7-day and 30-day rolling averages and trend direction.',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 30, max: 90)' } },
+					required: [],
+				},
+			},
+			{
+				name: 'get_daily_activity',
+				description: 'Daily non-workout activity from Apple Health: steps, walking distance, flights climbed, time in daylight, mindful minutes. Complements get_training_load by showing NEAT (non-exercise activity thermogenesis).',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
+					required: [],
+				},
+			},
 		],
 	}));
 
@@ -503,6 +521,8 @@ function createMcpServer(): Server {
 					const avgHrv3 = db.getAvgHrv(3);
 					const avgHrv30 = db.getAvgHrv(30);
 					const avgRhr30 = db.getAvgRhr(30);
+					const daylight = db.getHealthkitDayTotal('time_in_daylight', 1);
+					const mindful = db.getHealthkitDayTotal('mindful_minutes', 1);
 
 					if (!recovery) {
 						return { content: [{ type: 'text', text: 'No recovery data available yet. Run sync_data first.' }] };
@@ -562,6 +582,11 @@ function createMcpServer(): Server {
 						reasons.push(`sleep ${formatDuration(sleepShortfall)} short of need`);
 					}
 
+					if (daylight !== null && daylight.total < 20) {
+						if (verdict.startsWith('GREEN')) verdict = 'YELLOW — low daylight exposure';
+						reasons.push(`only ${Math.round(daylight.total)} min of daylight yesterday (circadian signal)`);
+					}
+
 					if (reasons.length === 0) reasons.push('all metrics in healthy range');
 
 					let response = `# Training Readiness\n\n`;
@@ -581,6 +606,12 @@ function createMcpServer(): Server {
 					}
 					if (cycle?.strain !== null && cycle?.strain !== undefined) {
 						response += `- **Yesterday's strain**: ${cycle.strain.toFixed(1)} ${getStrainZone(cycle.strain)}\n`;
+					}
+					if (daylight !== null) {
+						response += `- **Yesterday's daylight exposure**: ${Math.round(daylight.total)} min\n`;
+					}
+					if (mindful !== null && mindful.total > 0) {
+						response += `- **Yesterday's mindful minutes**: ${Math.round(mindful.total)} min\n`;
 					}
 
 					return { content: [{ type: 'text', text: response }] };
@@ -881,6 +912,126 @@ function createMcpServer(): Server {
 							const avgProteinPerKg = withProtein.reduce((s, r) => s + (r.protein_g ?? 0), 0) / withProtein.length / weightKg;
 							response += `- **Avg protein**: ${avgProteinPerKg.toFixed(2)} g/kg/day (target for strength: 1.6–2.2)\n`;
 						}
+					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_body_composition': {
+					const days = validateDays(typedArgs.days ?? 30);
+					const metrics = ['body_mass', 'body_fat_percentage', 'vo2_max'];
+					const rows = db.getHealthkitDailyAvg(days, metrics);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No body composition data in the last ${days} days. Enable Body Mass / Body Fat Percentage / VO2 Max in Health Auto Export.` }] };
+					}
+
+					const toKg = (qty: number, units: string | null): number => units === 'lb' ? qty * 0.453592 : qty;
+
+					type Day = { weight: number | null; bf: number | null; vo2: number | null };
+					const byDate = new Map<string, Day>();
+					for (const r of rows) {
+						if (!byDate.has(r.date)) byDate.set(r.date, { weight: null, bf: null, vo2: null });
+						const d = byDate.get(r.date)!;
+						if (r.metric === 'body_mass') d.weight = toKg(r.avg, r.units);
+						else if (r.metric === 'body_fat_percentage') d.bf = r.avg <= 1 ? r.avg * 100 : r.avg;
+						else if (r.metric === 'vo2_max') d.vo2 = r.avg;
+					}
+
+					const dates = Array.from(byDate.keys()).sort().reverse();
+					let response = `# Body Composition (Last ${days} Days)\n\n`;
+					response += '| Date | Weight (kg) | Body Fat % | Lean Mass (kg) | VO2 max |\n';
+					response += '|------|-------------|------------|----------------|---------|\n';
+					for (const date of dates) {
+						const d = byDate.get(date)!;
+						const lean = d.weight !== null && d.bf !== null ? d.weight * (1 - d.bf / 100) : null;
+						response += `| ${formatDate(date)} `
+							+ `| ${d.weight !== null ? d.weight.toFixed(1) : 'N/A'} `
+							+ `| ${d.bf !== null ? d.bf.toFixed(1) + '%' : 'N/A'} `
+							+ `| ${lean !== null ? lean.toFixed(1) : 'N/A'} `
+							+ `| ${d.vo2 !== null ? d.vo2.toFixed(1) : 'N/A'} |\n`;
+					}
+
+					const weights = dates.map(d => byDate.get(d)!.weight).filter((v): v is number => v !== null);
+					const avg = (arr: number[]): number => arr.length > 0 ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
+					const recent7 = weights.slice(0, Math.min(7, weights.length));
+					const recent30 = weights.slice(0, Math.min(30, weights.length));
+					const older7 = weights.slice(7, 14);
+
+					response += `\n### Summary\n`;
+					if (weights.length > 0) {
+						response += `- **Weigh-ins**: ${weights.length} / ${days} days\n`;
+						if (recent7.length >= 3) response += `- **7-day avg weight**: ${avg(recent7).toFixed(1)} kg\n`;
+						if (recent30.length >= 3) response += `- **30-day avg weight**: ${avg(recent30).toFixed(1)} kg\n`;
+						if (recent7.length >= 3 && older7.length >= 3) {
+							const delta = avg(recent7) - avg(older7);
+							response += `- **Week-over-week delta**: ${delta > 0 ? '+' : ''}${delta.toFixed(2)} kg (${delta > 0 ? 'gaining' : delta < 0 ? 'losing' : 'steady'})\n`;
+						}
+					}
+					const bfs = dates.map(d => byDate.get(d)!.bf).filter((v): v is number => v !== null);
+					if (bfs.length > 0) response += `- **Avg body fat**: ${avg(bfs).toFixed(1)}%\n`;
+					const vo2s = dates.map(d => byDate.get(d)!.vo2).filter((v): v is number => v !== null);
+					if (vo2s.length > 0) response += `- **Latest VO2 max**: ${vo2s[0].toFixed(1)} mL/(kg·min)\n`;
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_daily_activity': {
+					const days = validateDays(typedArgs.days);
+					const metrics = ['step_count', 'walking_running_distance', 'flights_climbed', 'time_in_daylight', 'mindful_minutes'];
+					const rows = db.getHealthkitDailyTotals(days, metrics);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No activity data in the last ${days} days.` }] };
+					}
+
+					type Day = { steps: number | null; km: number | null; flights: number | null; daylight: number | null; mindful: number | null };
+					const byDate = new Map<string, Day>();
+					for (const r of rows) {
+						if (!byDate.has(r.date)) byDate.set(r.date, { steps: null, km: null, flights: null, daylight: null, mindful: null });
+						const d = byDate.get(r.date)!;
+						if (r.metric === 'step_count') d.steps = r.total;
+						else if (r.metric === 'walking_running_distance') d.km = r.total;
+						else if (r.metric === 'flights_climbed') d.flights = r.total;
+						else if (r.metric === 'time_in_daylight') d.daylight = r.total;
+						else if (r.metric === 'mindful_minutes') d.mindful = r.total;
+					}
+
+					const dates = Array.from(byDate.keys()).sort().reverse();
+					let response = `# Daily Activity (Last ${days} Days)\n\n`;
+					response += '| Date | Steps | Distance | Flights | Daylight | Mindful |\n';
+					response += '|------|-------|----------|---------|----------|---------|\n';
+					for (const date of dates) {
+						const d = byDate.get(date)!;
+						response += `| ${formatDate(date)} `
+							+ `| ${d.steps !== null ? Math.round(d.steps).toLocaleString() : 'N/A'} `
+							+ `| ${d.km !== null ? d.km.toFixed(2) + ' km' : 'N/A'} `
+							+ `| ${d.flights !== null ? Math.round(d.flights) : 'N/A'} `
+							+ `| ${d.daylight !== null ? Math.round(d.daylight) + ' min' : 'N/A'} `
+							+ `| ${d.mindful !== null ? Math.round(d.mindful) + ' min' : 'N/A'} |\n`;
+					}
+
+					const allDays = dates.map(d => byDate.get(d)!);
+					const avgOf = (sel: (d: Day) => number | null): number | null => {
+						const vs = allDays.map(sel).filter((v): v is number => v !== null);
+						return vs.length > 0 ? vs.reduce((s, v) => s + v, 0) / vs.length : null;
+					};
+					const avgSteps = avgOf(d => d.steps);
+					const avgKm = avgOf(d => d.km);
+					const avgFlights = avgOf(d => d.flights);
+					const avgDaylight = avgOf(d => d.daylight);
+					const avgMindful = avgOf(d => d.mindful);
+
+					response += `\n### Averages\n`;
+					if (avgSteps !== null) response += `- **Steps**: ${Math.round(avgSteps).toLocaleString()} / day\n`;
+					if (avgKm !== null) response += `- **Distance**: ${avgKm.toFixed(2)} km / day\n`;
+					if (avgFlights !== null) response += `- **Flights climbed**: ${avgFlights.toFixed(1)} / day\n`;
+					if (avgDaylight !== null) response += `- **Time in daylight**: ${Math.round(avgDaylight)} min / day\n`;
+					if (avgMindful !== null) response += `- **Mindful minutes**: ${Math.round(avgMindful)} min / day\n`;
+
+					const lowMovementDays = allDays.filter(d => d.steps !== null && d.steps < 3000).length;
+					if (lowMovementDays > 0) {
+						response += `- **Low-movement days (<3k steps)**: ${lowMovementDays} / ${allDays.length}\n`;
 					}
 
 					return { content: [{ type: 'text', text: response }] };
