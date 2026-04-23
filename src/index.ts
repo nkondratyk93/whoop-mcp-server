@@ -772,30 +772,28 @@ async function main(): Promise<void> {
 				return;
 			}
 
+			if (sessionId && transports.has(sessionId)) {
+				const session = transports.get(sessionId)!;
+				session.lastAccess = Date.now();
+				await session.transport.handleRequest(req, res, req.body);
+				return;
+			}
+
 			if (req.method === 'POST') {
-				let transport: StreamableHTTPServerTransport;
+				const transport = new StreamableHTTPServerTransport({
+					sessionIdGenerator: () => crypto.randomUUID(),
+					onsessioninitialized: newSessionId => {
+						transports.set(newSessionId, { transport, lastAccess: Date.now() });
+					},
+				});
 
-				if (sessionId && transports.has(sessionId)) {
-					const session = transports.get(sessionId)!;
-					session.lastAccess = Date.now();
-					transport = session.transport;
-				} else {
-					transport = new StreamableHTTPServerTransport({
-						sessionIdGenerator: () => crypto.randomUUID(),
-						onsessioninitialized: newSessionId => {
-							transports.set(newSessionId, { transport, lastAccess: Date.now() });
-						},
-					});
-
-					const server = createMcpServer();
-					await server.connect(transport);
-				}
-
+				const server = createMcpServer();
+				await server.connect(transport);
 				await transport.handleRequest(req, res, req.body);
 				return;
 			}
 
-			res.status(405).send('Method not allowed');
+			res.status(400).send('Bad Request: mcp-session-id required');
 		});
 
 		app.get('/sse', (_req: Request, res: Response) => {
