@@ -596,17 +596,17 @@ export class WhoopDatabase {
 		return inserted;
 	}
 
-	getHealthkitDailyTotals(days: number, metrics: string[]): Array<{ date: string; metric: string; total: number; count: number }> {
+	getHealthkitDailyTotals(days: number, metrics: string[]): Array<{ date: string; metric: string; total: number; count: number; units: string | null }> {
 		if (metrics.length === 0) return [];
 		const placeholders = metrics.map(() => '?').join(',');
 		return this.db.prepare(`
-			SELECT DATE(date) as date, metric, SUM(qty) as total, COUNT(*) as count
+			SELECT DATE(date) as date, metric, SUM(qty) as total, COUNT(*) as count, MAX(units) as units
 			FROM healthkit_samples
 			WHERE metric IN (${placeholders})
 				AND DATE(date) >= DATE('now', '-' || ? || ' days')
 			GROUP BY DATE(date), metric
 			ORDER BY DATE(date) DESC, metric
-		`).all(...metrics, days) as Array<{ date: string; metric: string; total: number; count: number }>;
+		`).all(...metrics, days) as Array<{ date: string; metric: string; total: number; count: number; units: string | null }>;
 	}
 
 	getHealthkitSamples(metric: string, days: number): Array<{ date: string; qty: number; units: string | null }> {
@@ -625,7 +625,8 @@ export class WhoopDatabase {
 				WHERE kilojoule IS NOT NULL AND start_time >= DATE('now', '-' || ? || ' days')
 			),
 			kcal_in AS (
-				SELECT DATE(date) as date, SUM(qty) as total
+				SELECT DATE(date) as date,
+					SUM(CASE WHEN units = 'kJ' THEN qty / 4.184 ELSE qty END) as total
 				FROM healthkit_samples WHERE metric = 'dietary_energy'
 					AND DATE(date) >= DATE('now', '-' || ? || ' days')
 				GROUP BY DATE(date)

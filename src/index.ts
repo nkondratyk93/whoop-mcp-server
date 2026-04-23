@@ -753,6 +753,7 @@ function createMcpServer(): Server {
 						return { content: [{ type: 'text', text: `No nutrition data received for today (${today}) yet.` }] };
 					}
 
+					const toKcal = (qty: number, units: string | null): number => units === 'kJ' ? qty / 4.184 : qty;
 					const byMetric = new Map(todayRows.map(r => [r.metric, r]));
 					const kcal = byMetric.get('dietary_energy');
 					const protein = byMetric.get('protein');
@@ -760,7 +761,7 @@ function createMcpServer(): Server {
 					const fat = byMetric.get('total_fat');
 
 					let response = `# Nutrition Today (${today})\n\n`;
-					if (kcal) response += `- **Energy**: ${kcal.total.toFixed(0)} kcal (${kcal.count} entries)\n`;
+					if (kcal) response += `- **Energy**: ${toKcal(kcal.total, kcal.units).toFixed(0)} kcal (${kcal.count} entries)\n`;
 					if (protein) response += `- **Protein**: ${protein.total.toFixed(1)} g\n`;
 					if (carbs) response += `- **Carbs**: ${carbs.total.toFixed(1)} g\n`;
 					if (fat) response += `- **Fat**: ${fat.total.toFixed(1)} g\n`;
@@ -771,7 +772,7 @@ function createMcpServer(): Server {
 						response += `\n### Entries\n`;
 						for (const e of kcalEntries) {
 							const t = new Date(e.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-							response += `- ${t} — ${e.qty.toFixed(0)} kcal\n`;
+							response += `- ${t} — ${toKcal(e.qty, e.units).toFixed(0)} kcal\n`;
 						}
 					}
 
@@ -787,11 +788,12 @@ function createMcpServer(): Server {
 						return { content: [{ type: 'text', text: `No nutrition data in the last ${days} days.` }] };
 					}
 
+					const toKcal = (qty: number, units: string | null): number => units === 'kJ' ? qty / 4.184 : qty;
 					const byDate = new Map<string, { kcal: number | null; protein: number | null; carbs: number | null; fat: number | null }>();
 					for (const r of rows) {
 						if (!byDate.has(r.date)) byDate.set(r.date, { kcal: null, protein: null, carbs: null, fat: null });
 						const d = byDate.get(r.date)!;
-						if (r.metric === 'dietary_energy') d.kcal = r.total;
+						if (r.metric === 'dietary_energy') d.kcal = toKcal(r.total, r.units);
 						else if (r.metric === 'protein') d.protein = r.total;
 						else if (r.metric === 'carbohydrates') d.carbs = r.total;
 						else if (r.metric === 'total_fat') d.fat = r.total;
