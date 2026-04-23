@@ -622,12 +622,12 @@ export class WhoopDatabase {
 			WITH windowed AS (
 				SELECT
 					DATE(start_time) as date,
-					start_time,
-					COALESCE(end_time, DATETIME(start_time, '+24 hours')) as end_eff,
+					datetime(start_time) as start_dt,
+					COALESCE(datetime(end_time), datetime(start_time, '+24 hours')) as end_dt,
 					ROUND(kilojoule / 4.184, 0) as kcal_out
 				FROM cycles
 				WHERE kilojoule IS NOT NULL
-					AND start_time >= DATETIME('now', '-' || ? || ' days')
+					AND start_time >= datetime('now', '-' || ? || ' days')
 			)
 			SELECT
 				w.date,
@@ -635,14 +635,14 @@ export class WhoopDatabase {
 				(SELECT SUM(CASE WHEN units = 'kJ' THEN qty / 4.184 ELSE qty END)
 					FROM healthkit_samples
 					WHERE metric = 'dietary_energy'
-						AND date >= w.start_time
-						AND date < w.end_eff) as kcal_in,
+						AND datetime(date) >= w.start_dt
+						AND datetime(date) < w.end_dt) as kcal_in,
 				(SELECT SUM(qty) FROM healthkit_samples
 					WHERE metric = 'protein'
-						AND date >= w.start_time
-						AND date < w.end_eff) as protein_g
+						AND datetime(date) >= w.start_dt
+						AND datetime(date) < w.end_dt) as protein_g
 			FROM windowed w
-			ORDER BY w.start_time DESC
+			ORDER BY w.start_dt DESC
 		`).all(days) as Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }>;
 	}
 
