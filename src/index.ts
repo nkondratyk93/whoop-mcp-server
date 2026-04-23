@@ -904,7 +904,7 @@ async function main(): Promise<void> {
 		process.stderr.write('Whoop MCP server running on stdio\n');
 	} else {
 		const app = express();
-		app.use(express.json());
+		app.use(express.json({ limit: '10mb' }));
 
 		app.get('/callback', async (req: Request, res: Response) => {
 			const code = req.query.code as string | undefined;
@@ -927,7 +927,7 @@ async function main(): Promise<void> {
 			res.json({ status: 'ok', authenticated: Boolean(db.getTokens()) });
 		});
 
-		app.post('/healthkit', express.json({ limit: '10mb' }), (req: Request, res: Response) => {
+		app.post('/healthkit', (req: Request, res: Response) => {
 			if (!config.healthkitToken) {
 				res.status(503).json({ error: 'HEALTHKIT_TOKEN not configured on server' });
 				return;
