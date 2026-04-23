@@ -45,6 +45,8 @@ export class GarminClient {
 	private readonly password: string;
 	private readonly onTokensChange?: (tokens: GarminTokens) => void;
 	private loggedIn = false;
+	private loginAttempted = false;
+	private loginError: Error | null = null;
 
 	constructor(config: GarminClientConfig) {
 		this.email = config.email;
@@ -60,11 +62,19 @@ export class GarminClient {
 
 	async ensureLoggedIn(): Promise<void> {
 		if (this.loggedIn) return;
-		await this.gc.login(this.email, this.password);
-		this.loggedIn = true;
-		const exported = this.gc.exportToken();
-		if (exported) {
-			this.onTokensChange?.({ oauth1: exported.oauth1 as IOauth1Token, oauth2: exported.oauth2 as IOauth2Token });
+		if (this.loginAttempted && this.loginError) throw this.loginError;
+		this.loginAttempted = true;
+		try {
+			await this.gc.login(this.email, this.password);
+			this.loggedIn = true;
+			this.loginError = null;
+			const exported = this.gc.exportToken();
+			if (exported) {
+				this.onTokensChange?.({ oauth1: exported.oauth1 as IOauth1Token, oauth2: exported.oauth2 as IOauth2Token });
+			}
+		} catch (err) {
+			this.loginError = err instanceof Error ? err : new Error(String(err));
+			throw this.loginError;
 		}
 	}
 
@@ -86,6 +96,10 @@ export class GarminClient {
 	}
 
 	async getWeightRange(days: number): Promise<GarminDailyWeight[]> {
+		// Log in once up front so a 401/429/etc surfaces immediately, rather than
+		// once per day (which would hammer Garmin's SSO and invite bot-block).
+		await this.ensureLoggedIn();
+
 		const all: GarminDailyWeight[] = [];
 		const seenSamplePks = new Set<number>();
 		const now = new Date();
@@ -100,8 +114,11 @@ export class GarminClient {
 						all.push(e);
 					}
 				}
-			} catch {
-				// Tolerate per-day failures; return what we have.
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				if (/404/.test(message)) continue;
+				// Any other per-day error is unexpected — stop and surface it.
+				throw err;
 			}
 		}
 		return all;
