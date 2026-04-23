@@ -6,7 +6,6 @@ import express, { type Request, type Response } from 'express';
 import { WhoopClient } from './whoop-client.js';
 import { WhoopDatabase } from './database.js';
 import { WhoopSync } from './sync.js';
-import { GarminClient } from './garmin-client.js';
 
 interface ToolArguments {
 	days?: number;
@@ -22,8 +21,7 @@ const config = {
 	port: Number.parseInt(process.env.PORT ?? '3000', 10),
 	mode: process.env.MCP_MODE ?? 'http',
 	healthkitToken: process.env.HEALTHKIT_TOKEN ?? '',
-	garminEmail: process.env.GARMIN_EMAIL ?? '',
-	garminPassword: process.env.GARMIN_PASSWORD ?? '',
+	garminPushToken: process.env.GARMIN_PUSH_TOKEN ?? '',
 };
 
 const db = new WhoopDatabase(config.dbPath);
@@ -40,44 +38,6 @@ if (existingTokens) {
 }
 
 const sync = new WhoopSync(client, db);
-
-const garminClient: GarminClient | null = config.garminEmail && config.garminPassword
-	? new GarminClient({
-		email: config.garminEmail,
-		password: config.garminPassword,
-		onTokensChange: tokens => db.saveGarminTokens(tokens.oauth1, tokens.oauth2),
-	})
-	: null;
-
-if (garminClient) {
-	const saved = db.getGarminTokens();
-	if (saved) {
-		try {
-			garminClient.loadTokens({ oauth1: saved.oauth1 as never, oauth2: saved.oauth2 as never });
-		} catch {
-			// tokens unusable; ensureLoggedIn will re-login on demand
-		}
-	}
-}
-
-const GARMIN_SYNC_COOLDOWN_MS = 60 * 60 * 1000;
-
-async function syncGarminBodyComposition(days: number): Promise<number> {
-	if (!garminClient) throw new Error('Garmin not configured (set GARMIN_EMAIL and GARMIN_PASSWORD)');
-	const entries = await garminClient.getWeightRange(days);
-	if (entries.length > 0) db.upsertGarminBodyComposition(entries);
-	return entries.length;
-}
-
-async function garminBodyCompSmartSync(days = 30): Promise<void> {
-	if (!garminClient) return;
-	const last = db.getGarminBodyCompositionSyncedAt();
-	if (last) {
-		const ms = Date.now() - new Date(last + 'Z').getTime();
-		if (ms < GARMIN_SYNC_COOLDOWN_MS) return;
-	}
-	await syncGarminBodyComposition(days);
-}
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const transports = new Map<string, { transport: StreamableHTTPServerTransport; lastAccess: number }>();
@@ -1129,20 +1089,10 @@ function createMcpServer(): Server {
 				}
 
 				case 'get_body_composition': {
-					if (!garminClient) {
-						return { content: [{ type: 'text', text: 'Garmin not configured. Set GARMIN_EMAIL and GARMIN_PASSWORD env vars on the server.' }] };
-					}
 					const days = validateDays(typedArgs.days ?? 30);
-					try {
-						await garminBodyCompSmartSync(Math.max(days, 30));
-					} catch (err) {
-						const message = err instanceof Error ? err.message : String(err);
-						return { content: [{ type: 'text', text: `Garmin sync failed: ${message}` }], isError: true };
-					}
-
 					const rows = db.getGarminBodyComposition(days);
 					if (rows.length === 0) {
-						return { content: [{ type: 'text', text: `No body composition data from Garmin in the last ${days} days. Confirm you've weighed in on the Index scale recently.` }] };
+						return { content: [{ type: 'text', text: `No body composition data in the last ${days} days. Run the local garmin_push.py script on your laptop to sync weigh-ins from Garmin Connect.` }] };
 					}
 
 					let response = `# Body Composition (Last ${days} Days)\n\n`;
@@ -1297,6 +1247,53 @@ async function main(): Promise<void> {
 
 		app.get('/health', (_req: Request, res: Response) => {
 			res.json({ status: 'ok', authenticated: Boolean(db.getTokens()) });
+		});
+
+		app.post('/garmin/body-composition', (req: Request, res: Response) => {
+			if (!config.garminPushToken) {
+				res.status(503).json({ error: 'GARMIN_PUSH_TOKEN not configured on server' });
+				return;
+			}
+			if (req.headers.authorization !== `Bearer ${config.garminPushToken}`) {
+				res.status(401).json({ error: 'unauthorized' });
+				return;
+			}
+
+			const body = req.body as { entries?: Array<Record<string, unknown>> };
+			const entries = body?.entries;
+			if (!Array.isArray(entries)) {
+				res.status(400).json({ error: 'expected { entries: [...] }' });
+				return;
+			}
+
+			type Entry = Parameters<typeof db.upsertGarminBodyComposition>[0][number];
+			const clean: Entry[] = [];
+			for (const e of entries) {
+				const samplePk = typeof e.samplePk === 'number' ? e.samplePk : null;
+				const calendarDate = typeof e.calendarDate === 'string' ? e.calendarDate : null;
+				const timestampGMT = typeof e.timestampGMT === 'number' ? e.timestampGMT : null;
+				const weight = typeof e.weight === 'number' ? e.weight : null;
+				if (samplePk === null || !calendarDate || timestampGMT === null || weight === null) continue;
+				const numOrNull = (v: unknown): number | null => typeof v === 'number' ? v : null;
+				clean.push({
+					samplePk,
+					calendarDate,
+					timestampGMT,
+					weight,
+					bmi: numOrNull(e.bmi),
+					bodyFat: numOrNull(e.bodyFat),
+					bodyWater: numOrNull(e.bodyWater),
+					boneMass: numOrNull(e.boneMass),
+					muscleMass: numOrNull(e.muscleMass),
+					physiqueRating: numOrNull(e.physiqueRating),
+					visceralFat: numOrNull(e.visceralFat),
+					metabolicAge: numOrNull(e.metabolicAge),
+					sourceType: typeof e.sourceType === 'string' ? e.sourceType : 'UNKNOWN',
+				});
+			}
+
+			const inserted = db.upsertGarminBodyComposition(clean);
+			res.json({ received: entries.length, accepted: clean.length, upserted: inserted });
 		});
 
 		app.post('/healthkit', (req: Request, res: Response) => {

@@ -49,10 +49,27 @@ Built using the [Whoop Developer API v2](https://developer.whoop.com/docs/introd
 | `get_daily_activity` | `days` (1–90, default 14) | Steps, walking distance, flights climbed — NEAT signal that complements `get_training_load` |
 | `get_gait_metrics` | `days` (1–90, default 14) | Walking speed, step length, asymmetry %, double-support %. Injury-prevention signal |
 
-### Garmin (via Garmin Connect, requires GARMIN_EMAIL / GARMIN_PASSWORD)
+### Garmin (via local push script, requires GARMIN_PUSH_TOKEN)
 | Tool | Arguments | Description |
 |------|-----------|-------------|
-| `get_body_composition` | `days` (1–90, default 30) | Body composition trend from the Garmin Index scale: weight, BMI, body fat %, muscle mass, bone mass, body water %. Rolling 7/30-day averages and week-over-week delta |
+| `get_body_composition` | `days` (1–90, default 30) | Body composition trend from the Garmin Index scale: weight, BMI, body fat %, muscle mass, bone mass, body water %. Rolling 7/30-day averages and week-over-week delta. Data is pushed by `scripts/garmin_push.py` run locally — see below |
+
+**Why local push instead of server pull?** Garmin's SSO sits behind Cloudflare which bot-blocks requests from big cloud provider IP ranges (Railway included). Running a small script on your laptop sidesteps that entirely. The server just accepts JSON over HTTPS.
+
+**Setup:**
+
+```bash
+python3 -m venv scripts/.venv
+source scripts/.venv/bin/activate
+pip install garminconnect requests
+
+GARMIN_EMAIL=you@example.com \
+GARMIN_PASSWORD='...' \
+GARMIN_PUSH_TOKEN='matches-server-env-var' \
+python3 scripts/garmin_push.py
+```
+
+Run it whenever you weigh in, or schedule it via cron / launchd / systemd.
 
 ### Account
 | Tool | Arguments | Description |
@@ -125,8 +142,7 @@ npm run dev
 | `WHOOP_REDIRECT_URI` | OAuth callback URL | `http://localhost:3000/callback` |
 | `ENCRYPTION_SECRET` | Key-derivation secret for token-at-rest encryption | Falls back to `WHOOP_CLIENT_SECRET` |
 | `HEALTHKIT_TOKEN` | Bearer token required on `POST /healthkit` from Health Auto Export | Optional; unset = endpoint returns 503 |
-| `GARMIN_EMAIL` | Email for Garmin Connect login (unofficial, reverse-engineered auth — disable MFA on the Garmin account) | Optional; unset = Garmin tools return "not configured" |
-| `GARMIN_PASSWORD` | Password for Garmin Connect login; encrypted OAuth tokens are cached after first successful login | Optional |
+| `GARMIN_PUSH_TOKEN` | Bearer token required on `POST /garmin/body-composition` from the local `garmin_push.py` script | Optional; unset = endpoint returns 503 |
 | `DB_PATH` | SQLite database path | `./whoop.db` |
 | `PORT` | HTTP server port | `3000` |
 | `MCP_MODE` | `http` for remote, `stdio` for local | `http` |

@@ -701,24 +701,6 @@ export class WhoopDatabase {
 		`).all(days) as Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }>;
 	}
 
-	saveGarminTokens(oauth1: unknown, oauth2: unknown): void {
-		const a = encrypt(JSON.stringify(oauth1));
-		const b = encrypt(JSON.stringify(oauth2));
-		this.db.prepare(`
-			INSERT OR REPLACE INTO garmin_tokens (id, oauth1_token, oauth2_token, updated_at)
-			VALUES (1, ?, ?, CURRENT_TIMESTAMP)
-		`).run(a, b);
-	}
-
-	getGarminTokens(): { oauth1: unknown; oauth2: unknown } | null {
-		const row = this.db.prepare('SELECT oauth1_token, oauth2_token FROM garmin_tokens WHERE id = 1').get() as
-			{ oauth1_token: string; oauth2_token: string } | undefined;
-		if (!row) return null;
-		const a = isEncrypted(row.oauth1_token) ? decrypt(row.oauth1_token) : row.oauth1_token;
-		const b = isEncrypted(row.oauth2_token) ? decrypt(row.oauth2_token) : row.oauth2_token;
-		return { oauth1: JSON.parse(a), oauth2: JSON.parse(b) };
-	}
-
 	upsertGarminBodyComposition(entries: Array<{
 		samplePk: number;
 		calendarDate: string;
