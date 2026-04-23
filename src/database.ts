@@ -619,30 +619,31 @@ export class WhoopDatabase {
 
 	getEnergyBalance(days: number): Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }> {
 		return this.db.prepare(`
-			WITH d AS (
-				SELECT DATE(start_time) as date, ROUND(kilojoule / 4.184, 0) as kcal_out
+			WITH windowed AS (
+				SELECT
+					DATE(start_time) as date,
+					start_time,
+					COALESCE(end_time, DATETIME(start_time, '+24 hours')) as end_eff,
+					ROUND(kilojoule / 4.184, 0) as kcal_out
 				FROM cycles
-				WHERE kilojoule IS NOT NULL AND start_time >= DATE('now', '-' || ? || ' days')
-			),
-			kcal_in AS (
-				SELECT DATE(date) as date,
-					SUM(CASE WHEN units = 'kJ' THEN qty / 4.184 ELSE qty END) as total
-				FROM healthkit_samples WHERE metric = 'dietary_energy'
-					AND DATE(date) >= DATE('now', '-' || ? || ' days')
-				GROUP BY DATE(date)
-			),
-			protein AS (
-				SELECT DATE(date) as date, SUM(qty) as total
-				FROM healthkit_samples WHERE metric = 'protein'
-					AND DATE(date) >= DATE('now', '-' || ? || ' days')
-				GROUP BY DATE(date)
+				WHERE kilojoule IS NOT NULL
+					AND start_time >= DATETIME('now', '-' || ? || ' days')
 			)
-			SELECT d.date, kcal_in.total as kcal_in, d.kcal_out, protein.total as protein_g
-			FROM d
-			LEFT JOIN kcal_in ON kcal_in.date = d.date
-			LEFT JOIN protein ON protein.date = d.date
-			ORDER BY d.date DESC
-		`).all(days, days, days) as Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }>;
+			SELECT
+				w.date,
+				w.kcal_out,
+				(SELECT SUM(CASE WHEN units = 'kJ' THEN qty / 4.184 ELSE qty END)
+					FROM healthkit_samples
+					WHERE metric = 'dietary_energy'
+						AND date >= w.start_time
+						AND date < w.end_eff) as kcal_in,
+				(SELECT SUM(qty) FROM healthkit_samples
+					WHERE metric = 'protein'
+						AND date >= w.start_time
+						AND date < w.end_eff) as protein_g
+			FROM windowed w
+			ORDER BY w.start_time DESC
+		`).all(days) as Array<{ date: string; kcal_in: number | null; kcal_out: number | null; protein_g: number | null }>;
 	}
 
 	close(): void {
