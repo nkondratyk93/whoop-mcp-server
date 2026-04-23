@@ -1092,13 +1092,10 @@ function createMcpServer(): Server {
 					for (const r of rows) {
 						if (!byDate.has(r.date)) byDate.set(r.date, { speed: null, stepLen: null, asym: null, dblSupp: null });
 						const d = byDate.get(r.date)!;
-						const v = r.avg <= 1 && (r.metric === 'walking_asymmetry_percentage' || r.metric === 'walking_double_support_percentage')
-							? r.avg * 100
-							: r.avg;
-						if (r.metric === 'walking_speed') d.speed = v;
-						else if (r.metric === 'walking_step_length') d.stepLen = v;
-						else if (r.metric === 'walking_asymmetry_percentage') d.asym = v;
-						else if (r.metric === 'walking_double_support_percentage') d.dblSupp = v;
+						if (r.metric === 'walking_speed') d.speed = r.avg;
+						else if (r.metric === 'walking_step_length') d.stepLen = r.avg;
+						else if (r.metric === 'walking_asymmetry_percentage') d.asym = r.avg;
+						else if (r.metric === 'walking_double_support_percentage') d.dblSupp = r.avg;
 					}
 
 					const dates = Array.from(byDate.keys()).sort().reverse();
