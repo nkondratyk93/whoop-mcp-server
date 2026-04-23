@@ -1347,6 +1347,19 @@ async function main(): Promise<void> {
 				return;
 			}
 
+			// A session id was provided but the server doesn't know it (expired,
+			// evicted, or the container restarted). Per the MCP Streamable HTTP
+			// spec, this is 404 — signals the client to re-initialize instead of
+			// looping on the stale id.
+			if (sessionId) {
+				res.status(404).json({
+					jsonrpc: '2.0',
+					error: { code: -32001, message: 'Session not found. Re-initialize via POST /mcp.' },
+					id: null,
+				});
+				return;
+			}
+
 			if (req.method === 'POST') {
 				const transport = new StreamableHTTPServerTransport({
 					sessionIdGenerator: () => crypto.randomUUID(),
