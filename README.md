@@ -39,6 +39,15 @@ Built using the [Whoop Developer API v2](https://developer.whoop.com/docs/introd
 |------|-----------|-------------|
 | `get_workouts` | `days` (1–90, default 14), `min_strain` (number, optional) | Every captured workout field per session: id, sport, start/end + TZ, duration, strain, HR, zones ms + %, distance, elevation, % recorded, score state, record timestamps |
 
+### Nutrition & activity (Apple Health via Health Auto Export)
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `get_nutrition_today` | — | Today's total kcal / protein / carbs / fat with individual energy entries (auto-converts kJ → kcal) |
+| `get_nutrition_trend` | `days` (1–90, default 14) | Daily macro rollup with averages |
+| `get_energy_balance` | `days` (1–90, default 14) | Whoop kcal burned vs Apple Health kcal consumed, joined by cycle time-window. Shows deficit/surplus and protein per kg bodyweight |
+| `get_body_composition` | `days` (1–90, default 30) | Body weight, body fat %, VO2 max with 7/30-day rolling averages and week-over-week delta |
+| `get_daily_activity` | `days` (1–90, default 14) | Steps, walking distance, flights climbed, time in daylight, mindful minutes — NEAT signal that complements `get_training_load` |
+
 ### Account
 | Tool | Arguments | Description |
 |------|-----------|-------------|
@@ -109,6 +118,7 @@ npm run dev
 | `WHOOP_CLIENT_SECRET` | Whoop OAuth client secret | Required |
 | `WHOOP_REDIRECT_URI` | OAuth callback URL | `http://localhost:3000/callback` |
 | `ENCRYPTION_SECRET` | Key-derivation secret for token-at-rest encryption | Falls back to `WHOOP_CLIENT_SECRET` |
+| `HEALTHKIT_TOKEN` | Bearer token required on `POST /healthkit` from Health Auto Export | Optional; unset = endpoint returns 503 |
 | `DB_PATH` | SQLite database path | `./whoop.db` |
 | `PORT` | HTTP server port | `3000` |
 | `MCP_MODE` | `http` for remote, `stdio` for local | `http` |
