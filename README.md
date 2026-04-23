@@ -42,11 +42,12 @@ Built using the [Whoop Developer API v2](https://developer.whoop.com/docs/introd
 ### Nutrition & activity (Apple Health via Health Auto Export)
 | Tool | Arguments | Description |
 |------|-----------|-------------|
-| `get_nutrition_today` | — | Today's total kcal / protein / carbs / fat with individual energy entries (auto-converts kJ → kcal) |
+| `get_nutrition_today` | — | Today's macros (kcal/protein/carbs/fat with %-of-kcal, fat subtypes, fiber, sugar) + micros (Na, K, Ca, Fe, cholesterol, vitamin C) and individual energy entries. Auto-converts kJ → kcal |
 | `get_nutrition_trend` | `days` (1–90, default 14) | Daily macro rollup with averages |
 | `get_energy_balance` | `days` (1–90, default 14) | Whoop kcal burned vs Apple Health kcal consumed, joined by cycle time-window. Shows deficit/surplus and protein per kg bodyweight |
-| `get_body_composition` | `days` (1–90, default 30) | Body weight, body fat %, VO2 max with 7/30-day rolling averages and week-over-week delta |
-| `get_daily_activity` | `days` (1–90, default 14) | Steps, walking distance, flights climbed, time in daylight, mindful minutes — NEAT signal that complements `get_training_load` |
+| `get_energy_expenditure` | `days` (1–90, default 14) | Basal (BMR) + active kcal from Apple Health alongside Whoop cycle kcal, with Apple − Whoop delta |
+| `get_daily_activity` | `days` (1–90, default 14) | Steps, walking distance, flights climbed — NEAT signal that complements `get_training_load` |
+| `get_gait_metrics` | `days` (1–90, default 14) | Walking speed, step length, asymmetry %, double-support %. Injury-prevention signal |
 
 ### Account
 | Tool | Arguments | Description |

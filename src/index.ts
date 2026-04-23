@@ -212,17 +212,26 @@ function createMcpServer(): Server {
 				},
 			},
 			{
-				name: 'get_body_composition',
-				description: 'Body weight, body fat percentage, and VO2 max from Apple Health, with 7-day and 30-day rolling averages and trend direction.',
+				name: 'get_daily_activity',
+				description: 'Daily non-workout activity from Apple Health: steps, walking distance, flights climbed. Complements get_training_load by showing NEAT (non-exercise activity thermogenesis) — a day with low Whoop strain and high steps is different from a truly sedentary day.',
 				inputSchema: {
 					type: 'object',
-					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 30, max: 90)' } },
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
 					required: [],
 				},
 			},
 			{
-				name: 'get_daily_activity',
-				description: 'Daily non-workout activity from Apple Health: steps, walking distance, flights climbed, time in daylight, mindful minutes. Complements get_training_load by showing NEAT (non-exercise activity thermogenesis).',
+				name: 'get_energy_expenditure',
+				description: 'Daily energy expenditure from Apple Health: basal (BMR) + active kcal, with the Whoop cycle kcal alongside for cross-validation. Auto-converts kJ to kcal. Useful sanity check since Whoop and Apple Watch estimate burn differently.',
+				inputSchema: {
+					type: 'object',
+					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
+					required: [],
+				},
+			},
+			{
+				name: 'get_gait_metrics',
+				description: 'Walking gait metrics from Apple Health: walking speed, step length, asymmetry %, and double-support %. Used to spot injury-prevention signals — persistent asymmetry or elongated double-support time can flag developing issues before they become symptomatic.',
 				inputSchema: {
 					type: 'object',
 					properties: { days: { type: 'number', description: 'Number of days to analyze (default: 14, max: 90)' } },
@@ -521,8 +530,6 @@ function createMcpServer(): Server {
 					const avgHrv3 = db.getAvgHrv(3);
 					const avgHrv30 = db.getAvgHrv(30);
 					const avgRhr30 = db.getAvgRhr(30);
-					const daylight = db.getHealthkitDayTotal('time_in_daylight', 1);
-					const mindful = db.getHealthkitDayTotal('mindful_minutes', 1);
 
 					if (!recovery) {
 						return { content: [{ type: 'text', text: 'No recovery data available yet. Run sync_data first.' }] };
@@ -582,11 +589,6 @@ function createMcpServer(): Server {
 						reasons.push(`sleep ${formatDuration(sleepShortfall)} short of need`);
 					}
 
-					if (daylight !== null && daylight.total < 20) {
-						if (verdict.startsWith('GREEN')) verdict = 'YELLOW — low daylight exposure';
-						reasons.push(`only ${Math.round(daylight.total)} min of daylight yesterday (circadian signal)`);
-					}
-
 					if (reasons.length === 0) reasons.push('all metrics in healthy range');
 
 					let response = `# Training Readiness\n\n`;
@@ -606,12 +608,6 @@ function createMcpServer(): Server {
 					}
 					if (cycle?.strain !== null && cycle?.strain !== undefined) {
 						response += `- **Yesterday's strain**: ${cycle.strain.toFixed(1)} ${getStrainZone(cycle.strain)}\n`;
-					}
-					if (daylight !== null) {
-						response += `- **Yesterday's daylight exposure**: ${Math.round(daylight.total)} min\n`;
-					}
-					if (mindful !== null && mindful.total > 0) {
-						response += `- **Yesterday's mindful minutes**: ${Math.round(mindful.total)} min\n`;
 					}
 
 					return { content: [{ type: 'text', text: response }] };
@@ -775,7 +771,12 @@ function createMcpServer(): Server {
 				}
 
 				case 'get_nutrition_today': {
-					const metrics = ['dietary_energy', 'protein', 'carbohydrates', 'total_fat'];
+					const metrics = [
+						'dietary_energy', 'protein', 'carbohydrates', 'total_fat',
+						'saturated_fat', 'monounsaturated_fat', 'polyunsaturated_fat',
+						'fiber', 'dietary_sugar', 'cholesterol',
+						'sodium', 'potassium', 'calcium', 'iron', 'vitamin_c',
+					];
 					const totals = db.getHealthkitDailyTotals(1, metrics);
 					const today = new Date().toISOString().slice(0, 10);
 					const todayRows = totals.filter(t => t.date === today);
@@ -786,21 +787,69 @@ function createMcpServer(): Server {
 
 					const toKcal = (qty: number, units: string | null): number => units === 'kJ' ? qty / 4.184 : qty;
 					const byMetric = new Map(todayRows.map(r => [r.metric, r]));
+					const show = (key: string, unit: string, digits = 1): string | null => {
+						const r = byMetric.get(key);
+						if (!r) return null;
+						return `${r.total.toFixed(digits)} ${unit}`;
+					};
+
 					const kcal = byMetric.get('dietary_energy');
 					const protein = byMetric.get('protein');
 					const carbs = byMetric.get('carbohydrates');
 					const fat = byMetric.get('total_fat');
 
 					let response = `# Nutrition Today (${today})\n\n`;
-					if (kcal) response += `- **Energy**: ${toKcal(kcal.total, kcal.units).toFixed(0)} kcal (${kcal.count} entries)\n`;
-					if (protein) response += `- **Protein**: ${protein.total.toFixed(1)} g\n`;
-					if (carbs) response += `- **Carbs**: ${carbs.total.toFixed(1)} g\n`;
-					if (fat) response += `- **Fat**: ${fat.total.toFixed(1)} g\n`;
+					response += `## Macros\n`;
+					if (kcal) response += `- **Energy**: ${toKcal(kcal.total, kcal.units).toFixed(0)} kcal (${kcal.count} ${kcal.count === 1 ? 'entry' : 'entries'})\n`;
+					if (protein) {
+						const kcalFromProtein = protein.total * 4;
+						const pct = kcal ? (kcalFromProtein / toKcal(kcal.total, kcal.units)) * 100 : null;
+						response += `- **Protein**: ${protein.total.toFixed(1)} g${pct !== null ? ` (${pct.toFixed(0)}% of kcal)` : ''}\n`;
+					}
+					if (carbs) {
+						const kcalFromCarbs = carbs.total * 4;
+						const pct = kcal ? (kcalFromCarbs / toKcal(kcal.total, kcal.units)) * 100 : null;
+						response += `- **Carbs**: ${carbs.total.toFixed(1)} g${pct !== null ? ` (${pct.toFixed(0)}% of kcal)` : ''}\n`;
+					}
+					if (fat) {
+						const kcalFromFat = fat.total * 9;
+						const pct = kcal ? (kcalFromFat / toKcal(kcal.total, kcal.units)) * 100 : null;
+						response += `- **Fat**: ${fat.total.toFixed(1)} g${pct !== null ? ` (${pct.toFixed(0)}% of kcal)` : ''}\n`;
+					}
+
+					const sat = show('saturated_fat', 'g');
+					const mono = show('monounsaturated_fat', 'g');
+					const poly = show('polyunsaturated_fat', 'g');
+					if (sat || mono || poly) {
+						response += `  - Saturated ${sat ?? 'N/A'} · Monounsaturated ${mono ?? 'N/A'} · Polyunsaturated ${poly ?? 'N/A'}\n`;
+					}
+
+					const fiber = show('fiber', 'g');
+					const sugar = show('dietary_sugar', 'g');
+					if (fiber || sugar) {
+						response += `- **Fiber / Sugar**: ${fiber ?? 'N/A'} / ${sugar ?? 'N/A'}\n`;
+					}
+
+					const sodium = show('sodium', 'mg', 0);
+					const potassium = show('potassium', 'mg', 0);
+					const calcium = show('calcium', 'mg', 0);
+					const iron = show('iron', 'mg');
+					const cholesterol = show('cholesterol', 'mg', 0);
+					const vitC = show('vitamin_c', 'mg', 0);
+					if (sodium || potassium || calcium || iron || cholesterol || vitC) {
+						response += `\n## Micros\n`;
+						if (sodium) response += `- Sodium: ${sodium}\n`;
+						if (potassium) response += `- Potassium: ${potassium}\n`;
+						if (calcium) response += `- Calcium: ${calcium}\n`;
+						if (iron) response += `- Iron: ${iron}\n`;
+						if (cholesterol) response += `- Cholesterol: ${cholesterol}\n`;
+						if (vitC) response += `- Vitamin C: ${vitC}\n`;
+					}
 
 					const kcalEntries = db.getHealthkitSamples('dietary_energy', 1)
 						.filter(e => e.date.startsWith(today));
 					if (kcalEntries.length > 0) {
-						response += `\n### Entries\n`;
+						response += `\n## Entries\n`;
 						for (const e of kcalEntries) {
 							const t = new Date(e.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 							response += `- ${t} — ${toKcal(e.qty, e.units).toFixed(0)} kcal\n`;
@@ -917,98 +966,34 @@ function createMcpServer(): Server {
 					return { content: [{ type: 'text', text: response }] };
 				}
 
-				case 'get_body_composition': {
-					const days = validateDays(typedArgs.days ?? 30);
-					const metrics = ['body_mass', 'body_fat_percentage', 'vo2_max'];
-					const rows = db.getHealthkitDailyAvg(days, metrics);
-
-					if (rows.length === 0) {
-						return { content: [{ type: 'text', text: `No body composition data in the last ${days} days. Enable Body Mass / Body Fat Percentage / VO2 Max in Health Auto Export.` }] };
-					}
-
-					const toKg = (qty: number, units: string | null): number => units === 'lb' ? qty * 0.453592 : qty;
-
-					type Day = { weight: number | null; bf: number | null; vo2: number | null };
-					const byDate = new Map<string, Day>();
-					for (const r of rows) {
-						if (!byDate.has(r.date)) byDate.set(r.date, { weight: null, bf: null, vo2: null });
-						const d = byDate.get(r.date)!;
-						if (r.metric === 'body_mass') d.weight = toKg(r.avg, r.units);
-						else if (r.metric === 'body_fat_percentage') d.bf = r.avg <= 1 ? r.avg * 100 : r.avg;
-						else if (r.metric === 'vo2_max') d.vo2 = r.avg;
-					}
-
-					const dates = Array.from(byDate.keys()).sort().reverse();
-					let response = `# Body Composition (Last ${days} Days)\n\n`;
-					response += '| Date | Weight (kg) | Body Fat % | Lean Mass (kg) | VO2 max |\n';
-					response += '|------|-------------|------------|----------------|---------|\n';
-					for (const date of dates) {
-						const d = byDate.get(date)!;
-						const lean = d.weight !== null && d.bf !== null ? d.weight * (1 - d.bf / 100) : null;
-						response += `| ${formatDate(date)} `
-							+ `| ${d.weight !== null ? d.weight.toFixed(1) : 'N/A'} `
-							+ `| ${d.bf !== null ? d.bf.toFixed(1) + '%' : 'N/A'} `
-							+ `| ${lean !== null ? lean.toFixed(1) : 'N/A'} `
-							+ `| ${d.vo2 !== null ? d.vo2.toFixed(1) : 'N/A'} |\n`;
-					}
-
-					const weights = dates.map(d => byDate.get(d)!.weight).filter((v): v is number => v !== null);
-					const avg = (arr: number[]): number => arr.length > 0 ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
-					const recent7 = weights.slice(0, Math.min(7, weights.length));
-					const recent30 = weights.slice(0, Math.min(30, weights.length));
-					const older7 = weights.slice(7, 14);
-
-					response += `\n### Summary\n`;
-					if (weights.length > 0) {
-						response += `- **Weigh-ins**: ${weights.length} / ${days} days\n`;
-						if (recent7.length >= 3) response += `- **7-day avg weight**: ${avg(recent7).toFixed(1)} kg\n`;
-						if (recent30.length >= 3) response += `- **30-day avg weight**: ${avg(recent30).toFixed(1)} kg\n`;
-						if (recent7.length >= 3 && older7.length >= 3) {
-							const delta = avg(recent7) - avg(older7);
-							response += `- **Week-over-week delta**: ${delta > 0 ? '+' : ''}${delta.toFixed(2)} kg (${delta > 0 ? 'gaining' : delta < 0 ? 'losing' : 'steady'})\n`;
-						}
-					}
-					const bfs = dates.map(d => byDate.get(d)!.bf).filter((v): v is number => v !== null);
-					if (bfs.length > 0) response += `- **Avg body fat**: ${avg(bfs).toFixed(1)}%\n`;
-					const vo2s = dates.map(d => byDate.get(d)!.vo2).filter((v): v is number => v !== null);
-					if (vo2s.length > 0) response += `- **Latest VO2 max**: ${vo2s[0].toFixed(1)} mL/(kg·min)\n`;
-
-					return { content: [{ type: 'text', text: response }] };
-				}
-
 				case 'get_daily_activity': {
 					const days = validateDays(typedArgs.days);
-					const metrics = ['step_count', 'walking_running_distance', 'flights_climbed', 'time_in_daylight', 'mindful_minutes'];
+					const metrics = ['step_count', 'walking_running_distance', 'flights_climbed'];
 					const rows = db.getHealthkitDailyTotals(days, metrics);
 
 					if (rows.length === 0) {
 						return { content: [{ type: 'text', text: `No activity data in the last ${days} days.` }] };
 					}
 
-					type Day = { steps: number | null; km: number | null; flights: number | null; daylight: number | null; mindful: number | null };
+					type Day = { steps: number | null; km: number | null; flights: number | null };
 					const byDate = new Map<string, Day>();
 					for (const r of rows) {
-						if (!byDate.has(r.date)) byDate.set(r.date, { steps: null, km: null, flights: null, daylight: null, mindful: null });
+						if (!byDate.has(r.date)) byDate.set(r.date, { steps: null, km: null, flights: null });
 						const d = byDate.get(r.date)!;
 						if (r.metric === 'step_count') d.steps = r.total;
 						else if (r.metric === 'walking_running_distance') d.km = r.total;
 						else if (r.metric === 'flights_climbed') d.flights = r.total;
-						else if (r.metric === 'time_in_daylight') d.daylight = r.total;
-						else if (r.metric === 'mindful_minutes') d.mindful = r.total;
 					}
 
 					const dates = Array.from(byDate.keys()).sort().reverse();
 					let response = `# Daily Activity (Last ${days} Days)\n\n`;
-					response += '| Date | Steps | Distance | Flights | Daylight | Mindful |\n';
-					response += '|------|-------|----------|---------|----------|---------|\n';
+					response += '| Date | Steps | Distance | Flights |\n|------|-------|----------|---------|\n';
 					for (const date of dates) {
 						const d = byDate.get(date)!;
 						response += `| ${formatDate(date)} `
 							+ `| ${d.steps !== null ? Math.round(d.steps).toLocaleString() : 'N/A'} `
 							+ `| ${d.km !== null ? d.km.toFixed(2) + ' km' : 'N/A'} `
-							+ `| ${d.flights !== null ? Math.round(d.flights) : 'N/A'} `
-							+ `| ${d.daylight !== null ? Math.round(d.daylight) + ' min' : 'N/A'} `
-							+ `| ${d.mindful !== null ? Math.round(d.mindful) + ' min' : 'N/A'} |\n`;
+							+ `| ${d.flights !== null ? Math.round(d.flights) : 'N/A'} |\n`;
 					}
 
 					const allDays = dates.map(d => byDate.get(d)!);
@@ -1019,20 +1004,135 @@ function createMcpServer(): Server {
 					const avgSteps = avgOf(d => d.steps);
 					const avgKm = avgOf(d => d.km);
 					const avgFlights = avgOf(d => d.flights);
-					const avgDaylight = avgOf(d => d.daylight);
-					const avgMindful = avgOf(d => d.mindful);
 
 					response += `\n### Averages\n`;
 					if (avgSteps !== null) response += `- **Steps**: ${Math.round(avgSteps).toLocaleString()} / day\n`;
 					if (avgKm !== null) response += `- **Distance**: ${avgKm.toFixed(2)} km / day\n`;
 					if (avgFlights !== null) response += `- **Flights climbed**: ${avgFlights.toFixed(1)} / day\n`;
-					if (avgDaylight !== null) response += `- **Time in daylight**: ${Math.round(avgDaylight)} min / day\n`;
-					if (avgMindful !== null) response += `- **Mindful minutes**: ${Math.round(avgMindful)} min / day\n`;
 
 					const lowMovementDays = allDays.filter(d => d.steps !== null && d.steps < 3000).length;
 					if (lowMovementDays > 0) {
 						response += `- **Low-movement days (<3k steps)**: ${lowMovementDays} / ${allDays.length}\n`;
 					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_energy_expenditure': {
+					const days = validateDays(typedArgs.days);
+					const rows = db.getHealthkitDailyTotals(days, ['basal_energy_burned', 'active_energy']);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No energy expenditure data in the last ${days} days.` }] };
+					}
+
+					const toKcal = (qty: number, units: string | null): number => units === 'kJ' ? qty / 4.184 : qty;
+					type Day = { basal: number | null; active: number | null };
+					const byDate = new Map<string, Day>();
+					for (const r of rows) {
+						if (!byDate.has(r.date)) byDate.set(r.date, { basal: null, active: null });
+						const d = byDate.get(r.date)!;
+						if (r.metric === 'basal_energy_burned') d.basal = toKcal(r.total, r.units);
+						else if (r.metric === 'active_energy') d.active = toKcal(r.total, r.units);
+					}
+
+					const strainTrends = db.getStrainTrends(days);
+					const whoopByDate = new Map(strainTrends.map(s => [s.date, s.calories]));
+
+					const dates = Array.from(byDate.keys()).sort().reverse();
+					let response = `# Energy Expenditure (Last ${days} Days)\n\n`;
+					response += '| Date | Basal | Active | Apple TDEE | Whoop kcal | Δ |\n';
+					response += '|------|-------|--------|------------|------------|---|\n';
+
+					let sumBasal = 0, sumActive = 0;
+					let basalN = 0, activeN = 0;
+					const deltas: number[] = [];
+
+					for (const date of dates) {
+						const d = byDate.get(date)!;
+						const tdee = d.basal !== null && d.active !== null ? d.basal + d.active : null;
+						const whoop = whoopByDate.get(date) ?? null;
+						const delta = tdee !== null && whoop !== null ? tdee - whoop : null;
+						if (d.basal !== null) { sumBasal += d.basal; basalN++; }
+						if (d.active !== null) { sumActive += d.active; activeN++; }
+						if (delta !== null) deltas.push(delta);
+						response += `| ${formatDate(date)} `
+							+ `| ${d.basal !== null ? d.basal.toFixed(0) : 'N/A'} `
+							+ `| ${d.active !== null ? d.active.toFixed(0) : 'N/A'} `
+							+ `| ${tdee !== null ? tdee.toFixed(0) : 'N/A'} `
+							+ `| ${whoop !== null ? whoop.toFixed(0) : 'N/A'} `
+							+ `| ${delta !== null ? (delta > 0 ? '+' : '') + delta.toFixed(0) : 'N/A'} |\n`;
+					}
+
+					response += `\n### Summary\n`;
+					if (basalN > 0) response += `- **Avg basal (BMR)**: ${(sumBasal / basalN).toFixed(0)} kcal / day\n`;
+					if (activeN > 0) response += `- **Avg active**: ${(sumActive / activeN).toFixed(0)} kcal / day\n`;
+					if (basalN > 0 && activeN > 0) {
+						response += `- **Avg Apple TDEE**: ${((sumBasal / basalN) + (sumActive / activeN)).toFixed(0)} kcal / day\n`;
+					}
+					if (deltas.length > 0) {
+						const avgDelta = deltas.reduce((s, v) => s + v, 0) / deltas.length;
+						response += `- **Avg Apple − Whoop**: ${avgDelta > 0 ? '+' : ''}${avgDelta.toFixed(0)} kcal (${avgDelta > 0 ? 'Apple higher' : 'Whoop higher'})\n`;
+					}
+
+					return { content: [{ type: 'text', text: response }] };
+				}
+
+				case 'get_gait_metrics': {
+					const days = validateDays(typedArgs.days);
+					const metrics = ['walking_speed', 'walking_step_length', 'walking_asymmetry_percentage', 'walking_double_support_percentage'];
+					const rows = db.getHealthkitDailyAvg(days, metrics);
+
+					if (rows.length === 0) {
+						return { content: [{ type: 'text', text: `No gait data in the last ${days} days.` }] };
+					}
+
+					type Day = { speed: number | null; stepLen: number | null; asym: number | null; dblSupp: number | null };
+					const byDate = new Map<string, Day>();
+					for (const r of rows) {
+						if (!byDate.has(r.date)) byDate.set(r.date, { speed: null, stepLen: null, asym: null, dblSupp: null });
+						const d = byDate.get(r.date)!;
+						const v = r.avg <= 1 && (r.metric === 'walking_asymmetry_percentage' || r.metric === 'walking_double_support_percentage')
+							? r.avg * 100
+							: r.avg;
+						if (r.metric === 'walking_speed') d.speed = v;
+						else if (r.metric === 'walking_step_length') d.stepLen = v;
+						else if (r.metric === 'walking_asymmetry_percentage') d.asym = v;
+						else if (r.metric === 'walking_double_support_percentage') d.dblSupp = v;
+					}
+
+					const dates = Array.from(byDate.keys()).sort().reverse();
+					let response = `# Gait Metrics (Last ${days} Days)\n\n`;
+					response += '| Date | Speed (km/h) | Step length (cm) | Asymmetry % | Double-support % |\n';
+					response += '|------|--------------|------------------|-------------|------------------|\n';
+					for (const date of dates) {
+						const d = byDate.get(date)!;
+						response += `| ${formatDate(date)} `
+							+ `| ${d.speed !== null ? d.speed.toFixed(2) : 'N/A'} `
+							+ `| ${d.stepLen !== null ? d.stepLen.toFixed(1) : 'N/A'} `
+							+ `| ${d.asym !== null ? d.asym.toFixed(1) : 'N/A'} `
+							+ `| ${d.dblSupp !== null ? d.dblSupp.toFixed(1) : 'N/A'} |\n`;
+					}
+
+					const allDays = dates.map(d => byDate.get(d)!);
+					const avgOf = (sel: (d: Day) => number | null): number | null => {
+						const vs = allDays.map(sel).filter((v): v is number => v !== null);
+						return vs.length > 0 ? vs.reduce((s, v) => s + v, 0) / vs.length : null;
+					};
+					const aSpeed = avgOf(d => d.speed);
+					const aStepLen = avgOf(d => d.stepLen);
+					const aAsym = avgOf(d => d.asym);
+					const aDbl = avgOf(d => d.dblSupp);
+
+					response += `\n### Averages\n`;
+					if (aSpeed !== null) response += `- **Walking speed**: ${aSpeed.toFixed(2)} km/h\n`;
+					if (aStepLen !== null) response += `- **Step length**: ${aStepLen.toFixed(1)} cm\n`;
+					if (aAsym !== null) {
+						response += `- **Asymmetry**: ${aAsym.toFixed(1)}%`;
+						if (aAsym >= 3) response += ` (⚠ Apple flags >3% as a watch-point)`;
+						response += '\n';
+					}
+					if (aDbl !== null) response += `- **Double-support time**: ${aDbl.toFixed(1)}%\n`;
 
 					return { content: [{ type: 'text', text: response }] };
 				}
